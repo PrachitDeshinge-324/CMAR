@@ -1,0 +1,28 @@
+# requirements.txt
+
+# Core library for building stateful, multi-agent applications
+langgraph
+
+# Core LangChain library for abstractions
+langchain
+langchain-core
+langchain-community
+
+# Provider for Google's Gemini models
+langchain-google-genai
+
+# For loading the configuration file
+pyyaml
+
+# For managing environment variables (like API keys)
+python-dotenv
+
+# --- New RAG Dependencies ---
+# For making HTTP requests to the PubMed API
+requests
+
+# Vector store for in-memory RAG
+faiss-cpu
+
+# For splitting text into chunks
+tiktoken

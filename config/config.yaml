@@ -1,0 +1,6 @@
+# API Keys and Model Configuration
+# IMPORTANT: Replace "YOUR_GEMINI_API_KEY" with your actual Google AI Studio API key.
+# You can also set this as an environment variable named GOOGLE_API_KEY.
+gemini:
+  api_key: "AIzaSyAVBAfM7qpGZF1XFAKWPiFsUXlCkwWAwk0"
+  generation_model: "gemini-2.5-flash"
