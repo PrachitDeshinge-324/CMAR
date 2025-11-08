@@ -1,0 +1,95 @@
+# agents/risk_assessor.py
+from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel, Field
+from langchain_core.output_parsers import PydanticOutputParser
+from langchain_google_genai import ChatGoogleGenerativeAI
+from typing import List, Dict, Any
+
+# Define the structured output for a single risk assessment
+class RiskAssessment(BaseModel):
+    hypothesis: str = Field(description="The name of the medical hypothesis being assessed.")
+    severity: int = Field(description="A score from 1 (mild) to 10 (life-threatening) indicating the severity of the condition if it is the correct diagnosis.")
+    likelihood: int = Field(description="A score from 1 (very unlikely) to 10 (very likely) indicating how well the evidence supports this diagnosis for this specific patient.")
+    justification: str = Field(description="A brief, context-based justification for the assigned severity and likelihood scores, referencing the patient scenario and evidence.")
+
+# Define the top-level list that the LLM will return
+class RiskAssessmentList(BaseModel):
+    assessments: List[RiskAssessment]
+
+class RiskAssessorAgent:
+    """
+    An agent that performs contextual risk assessment on medical hypotheses.
+    It does NOT use statistical data, but reasons based on the provided
+    patient scenario and evidence.
+    """
+    def __init__(self, llm: ChatGoogleGenerativeAI):
+        self.llm = llm
+        self.system_prompt = """You are an expert clinical risk analyst. Your task is to assess the potential risk of several medical hypotheses based ONLY on the provided evidence and the patient's specific scenario.
+
+        **CRITICAL INSTRUCTIONS:**
+        1.  **DO NOT use external knowledge or statistical probabilities.** Your assessment must be derived *exclusively* from the context I provide.
+        2.  **Assess Severity:** How dangerous is this condition if it's true? (1=mild, 10=life-threatening).
+        3.  **Assess Likelihood:** For this specific patient, given their summary and the evidence found, how likely is this diagnosis? (1=very unlikely, 10=very likely).
+        4.  Provide a concise justification for your scores, linking the evidence to the patient's situation.
+        """
+        self.parser = PydanticOutputParser(pydantic_object=RiskAssessmentList)
+        self.prompt = ChatPromptTemplate.from_messages([
+            ("system", self.system_prompt),
+            ("human", """
+            **Critic's Challenge (You MUST consider this if present else assess the following hypotheses for the patient.):**
+            {critic_challenge}
+
+            **Patient Scenario:**
+            {patient_summary}
+
+            **Hypotheses and Evidence:**
+            {hypotheses_with_evidence}
+
+            Based on the new challenge, re-assess the severity and likelihood scores.
+            {format_instructions}
+            """)
+        ])
+        self.chain = self.prompt | self.llm | self.parser
+
+    def _format_hypotheses_for_prompt(self, hypotheses: List[Dict]) -> str:
+        """Formats the list of hypotheses and their evidence into a single string."""
+        formatted_string = ""
+        for i, hypo in enumerate(hypotheses):
+            formatted_string += f"\n--- Hypothesis {i+1} ---\n"
+            formatted_string += f"Name: {hypo['hypothesis']}\n"
+            formatted_string += f"Evidence: {hypo['evidence']}\n"
+        return formatted_string
+
+    def assess_risk_for_specialty(
+        self, patient_summary: str, hypotheses: List[Dict], critic_challenge: str = "None. This is the initial assessment."
+    ) -> List[Dict]:
+        """
+        Takes a list of hypotheses for one specialty and enriches them with risk scores.
+        Makes a single, efficient LLM call for all hypotheses in the specialty.
+        """
+        print(f"    - Assessing risk for {len(hypotheses)} hypotheses...")
+        
+        # Format the input for the LLM
+        hypotheses_with_evidence = self._format_hypotheses_for_prompt(hypotheses)
+        
+        # Invoke the LLM chain
+        result = self.chain.invoke({
+            "patient_summary": patient_summary,
+            "hypotheses_with_evidence": hypotheses_with_evidence,
+            "format_instructions": self.parser.get_format_instructions(),
+            "critic_challenge": critic_challenge, # <-- Pass to prompt
+        })
+
+        # Integrate the new scores back into the original hypothesis objects
+        assessment_map = {assessment.hypothesis: assessment for assessment in result.assessments}
+        
+        updated_hypotheses = []
+        for hypo in hypotheses:
+            assessment = assessment_map.get(hypo['hypothesis'])
+            if assessment:
+                hypo['severity'] = assessment.severity
+                hypo['likelihood'] = assessment.likelihood
+                hypo['risk_justification'] = assessment.justification
+            updated_hypotheses.append(hypo)
+        
+        return updated_hypotheses
