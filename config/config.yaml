@@ -4,3 +4,11 @@
 gemini:
   api_key: "AIzaSyAVBAfM7qpGZF1XFAKWPiFsUXlCkwWAwk0"
   generation_model: "gemini-2.5-flash"
+
+embeddings:
+  provider: "google"
+  # models/text-embedding-004 is a powerful and efficient choice.
+  model: "models/text-embedding-004"
+  # The API key can be the same one used for generation.
+  # The code will prioritize the GOOGLE_API_KEY environment variable if it's set.
+  api_key: "AIzaSyAVBAfM7qpGZF1XFAKWPiFsUXlCkwWAwk0"

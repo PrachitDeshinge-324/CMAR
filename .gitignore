@@ -1,0 +1,85 @@
+// ...existing code...
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+downloads/
+.eggs/
+*.egg-info/
+pip-wheel-metadata/
+
+# Virtual environments
+env/
+venv/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# PyInstaller
+dist/
+build/
+
+# Unit test / coverage
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.pytest_cache/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# macOS
+.DS_Store
+
+# Logs and databases
+*.log
+*.sql
+*.sqlite3
+*.db
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# Type checkers / caches
+.mypy_cache/
+.pyre/
+.pytype/
+
+# Environment and secrets
+.env
+.env.*
+.envrc
+.python-version
+
+# Dependency managers / packaging helpers
+Pipfile.lock
+poetry.lock
+__pypackages__/
+
+# Node modules (if project uses node tooling)
+node_modules/
+
+# Large model artifacts / checkpoints
+models/
+*.bin
+*.pt
+*.ckpt
+
+*.pkl
+*.faiss
+*.zip

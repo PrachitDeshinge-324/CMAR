@@ -7,6 +7,7 @@ langgraph
 langchain
 langchain-core
 langchain-community
+langchain-huggingface
 
 # Provider for Google's Gemini models
 langchain-google-genai
@@ -21,8 +22,17 @@ python-dotenv
 # For making HTTP requests to the PubMed API
 requests
 
+# For downloading datasets like PubMedQA from Hugging Face
+datasets
+
 # Vector store for in-memory RAG
 faiss-cpu
 
 # For splitting text into chunks
 tiktoken
+
+duckduckgo-search
+
+sentence-transformers
+
+ddgs
