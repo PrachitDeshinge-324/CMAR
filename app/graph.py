@@ -1,6 +1,7 @@
 # app/graph.py
 from typing import TypedDict, List, Dict
 from langgraph.graph import StateGraph, END
+from concurrent.futures import ThreadPoolExecutor # We need this back!
 
 # LLM and Tool Imports
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -22,7 +23,7 @@ class CmarState(TypedDict):
     patient_scenario: Dict
     specialty_groups: Dict[str, List[Dict]]
     critic_feedback: Dict
-    critic_history: List[Dict]  # Track all critic feedback across iterations
+    critic_history: List[Dict]
     refinement_loop_count: int
     final_report: Dict
 
@@ -57,44 +58,70 @@ def build_graph(llm_client: ChatGoogleGenerativeAI, embeddings_client: HuggingFa
         print("\n--- Executing Node: Sequential Evidence Evaluation ---")
         patient_summary = state['patient_scenario']['summary']
         specialty_groups = state['specialty_groups']
+        critic_feedback = state.get('critic_feedback', {})
+        targeted_specialty = critic_feedback.get('target_specialty')
+        
         updated_groups = {}
+        
         for specialty, hypotheses in specialty_groups.items():
-            print(f"  -> Evaluating specialty: {specialty}")
-            # We only re-evaluate if the hypothesis doesn't already have evidence
-            # or if the critic has modified this specialty group.
+            # Check if this specialty was targeted by the critic
+            is_critic_target = (specialty == targeted_specialty)
+            
+            # Re-evaluate if:
+            # 1. There are new hypotheses without evidence, OR
+            # 2. This specialty was targeted by the critic (to get fresh evidence)
             hypotheses_to_evaluate = [h for h in hypotheses if 'evidence' not in h]
-            if hypotheses_to_evaluate:
-                updated_hypotheses = evidence_evaluator_agent.evaluate_hypotheses_for_specialty(patient_summary, hypotheses_to_evaluate)
+            
+            if hypotheses_to_evaluate or is_critic_target:
+                if is_critic_target and not hypotheses_to_evaluate:
+                    # Critic targeted this specialty - re-evaluate all hypotheses
+                    print(f"  -> Re-evaluating specialty: {specialty} (targeted by critic)")
+                    hypotheses_to_evaluate = hypotheses
+                else:
+                    print(f"  -> Evaluating specialty: {specialty} ({len(hypotheses_to_evaluate)} hypotheses)")
+                
+                updated_hypotheses = evidence_evaluator_agent.evaluate_hypotheses_for_specialty(
+                    patient_summary, hypotheses_to_evaluate
+                )
                 # Merge back with already evaluated hypotheses
                 evaluated_map = {h['hypothesis']: h for h in updated_hypotheses}
                 final_hypotheses = [evaluated_map.get(h['hypothesis'], h) for h in hypotheses]
                 updated_groups[specialty] = final_hypotheses
             else:
-                updated_groups[specialty] = hypotheses # No change needed
+                # Skip if no new hypotheses and not critic target
+                updated_groups[specialty] = hypotheses
+        
         return {"specialty_groups": updated_groups}
 
     def run_risk_assessment(state: CmarState):
-        print("\n--- Executing Node: Sequential Risk Assessment (Rate-Limited) ---")
+        """Node 3: Reverted to PARALLEL risk assessment for performance."""
+        print("\n--- Executing Node: Parallel Risk Assessment (Rate-Limited) ---")
         patient_summary = state['patient_scenario']['summary']
         specialty_groups = state['specialty_groups']
         feedback = state.get('critic_feedback', {})
         target_specialty = feedback.get('target_specialty')
         challenge = feedback.get('feedback', "None. Initial assessment.")
-        
-        updated_groups = {}
-        for specialty, hypotheses in specialty_groups.items():
-            # Apply the challenge only to the targeted specialty
-            current_challenge = challenge if specialty == target_specialty else "None. Initial assessment."
-            try:
-                print(f"  -> Assessing risk for specialty: {specialty}")
-                updated_hypotheses = risk_assessor_agent.assess_risk_for_specialty(
+
+        # Re-introducing ThreadPoolExecutor. The global rate limiter will handle API calls safely.
+        with ThreadPoolExecutor() as executor:
+            future_to_specialty = {}
+            for specialty, hypotheses in specialty_groups.items():
+                current_challenge = challenge if specialty == target_specialty else "None. Initial assessment."
+                future = executor.submit(
+                    risk_assessor_agent.assess_risk_for_specialty,
                     patient_summary, hypotheses, current_challenge
                 )
-                updated_groups[specialty] = updated_hypotheses
-                print(f"  -> Finished risk assessment for specialty: {specialty}")
-            except Exception as exc:
-                print(f"  -> Risk assessment for {specialty} generated an exception: {exc}")
-                updated_groups[specialty] = specialty_groups[specialty]
+                future_to_specialty[future] = specialty
+            
+            updated_groups = {}
+            for future, specialty in future_to_specialty.items():
+                try:
+                    updated_hypotheses = future.result()
+                    updated_groups[specialty] = updated_hypotheses
+                    print(f"  -> Finished risk assessment for specialty: {specialty}")
+                except Exception as exc:
+                    print(f"  -> Risk assessment for {specialty} generated an exception: {exc}")
+                    updated_groups[specialty] = specialty_groups[specialty]
         
         return {"specialty_groups": updated_groups}
 
@@ -173,14 +200,14 @@ def build_graph(llm_client: ChatGoogleGenerativeAI, embeddings_client: HuggingFa
         print("--- Checking Critic's Directive ---")
         if state.get('refinement_loop_count', 0) >= 3:
             print("-> Maximum refinement loops reached. Proceeding to Synthesizer.")
-            return "synthesize" # Change "end" to "synthesize"
+            return "synthesize"
         
         if state['critic_feedback']['decision'] != 'APPROVE':
             print("-> Directive is a refinement. Looping back.")
             return "refine"
         else:
             print("-> Directive is APPROVE. Proceeding to Synthesizer.")
-            return "synthesize" # Change "end" to "synthesize"
+            return "synthesize"
         
     # --- GRAPH WIRING ---
     workflow = StateGraph(CmarState)

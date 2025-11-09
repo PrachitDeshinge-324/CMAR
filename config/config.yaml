@@ -5,9 +5,9 @@ gemini:
   api_key: "AIzaSyAVBAfM7qpGZF1XFAKWPiFsUXlCkwWAwk0"
   generation_model: "gemini-2.5-flash"
   # Rate limiting configuration (Gemini free tier allows 10 requests/minute)
-  # We use 8 to leave a safety buffer
+  # Optimized: Use 9 for better performance while staying safe
   rate_limit:
-    max_calls: 8
+    max_calls: 9
     time_window: 60  # seconds
 
 embeddings:
