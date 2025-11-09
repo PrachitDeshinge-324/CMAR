@@ -1,38 +1,32 @@
+# ===========================
 # requirements.txt
+# ===========================
+# Core libraries for stateful, multi-agent, and LLM applications
+langgraph                   # For building stateful, multi-agent workflows
+langchain                  # Core LangChain abstractions
+langchain-core             # LangChain core utilities
+langchain-community        # Community-contributed LangChain integrations
+langchain-huggingface      # HuggingFace integration for LangChain
+langchain-google-genai     # Google Gemini models integration for LangChain
 
-# Core library for building stateful, multi-agent applications
-langgraph
+# Environment and configuration management
+pyyaml                     # For YAML configuration files
+python-dotenv              # For loading environment variables from .env
 
-# Core LangChain library for abstractions
-langchain
-langchain-core
-langchain-community
-langchain-huggingface
+# Retrieval-Augmented Generation (RAG) dependencies
+requests                   # HTTP requests (e.g., PubMed API)
+datasets                   # Downloading datasets (e.g., PubMedQA from Hugging Face)
+faiss-cpu                  # In-memory vector store for RAG
+tiktoken                   # Tokenizer for text splitting
 
-# Provider for Google's Gemini models
-langchain-google-genai
+# Search and embedding tools
+duckduckgo-search          # DuckDuckGo web search integration
+sentence-transformers      # Sentence embeddings (HuggingFace models)
+ddgs                       # Alternative DuckDuckGo search API
 
-# For loading the configuration file
-pyyaml
+# App and UI
+streamlit                  # Web app framework for Python
 
-# For managing environment variables (like API keys)
-python-dotenv
-
-# --- New RAG Dependencies ---
-# For making HTTP requests to the PubMed API
-requests
-
-# For downloading datasets like PubMedQA from Hugging Face
-datasets
-
-# Vector store for in-memory RAG
-faiss-cpu
-
-# For splitting text into chunks
-tiktoken
-
-duckduckgo-search
-
-sentence-transformers
-
-ddgs
+# ===========================
+# End of requirements.txt
+# ===========================
