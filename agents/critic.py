@@ -42,7 +42,11 @@ class CriticAgent:
         4.  **DISCARD_HYPOTHESIS**: If a diagnosis is clearly unsupported or redundant. Specify the hypothesis to remove.
             (Example: target='Musculoskeletal', hypothesis_to_discard='Costochondritis', feedback='The evidence found has zero relevance to this diagnosis, making it noise.')
 
-        Your directive must be targeted to a single specialty.
+        IMPORTANT: 
+        - Your directive must be targeted to a single specialty.
+        - Review your previous feedback to avoid repeating the same critiques.
+        - Target DIFFERENT specialties across iterations to ensure comprehensive review.
+        - If you've already challenged a specialty, consider other specialties unless critical issues remain.
         """
         self.parser = PydanticOutputParser(pydantic_object=CriticDecision)
         self.prompt = ChatPromptTemplate.from_messages([
@@ -51,10 +55,14 @@ class CriticAgent:
             **Patient Scenario:**
             {patient_summary}
 
-            **Combined Analysis from Specialists:**
+            **Previous Feedback (avoid repeating):**
+            {previous_feedback}
+
+            **Current Analysis from Specialists:**
             {combined_analysis}
 
             Review the analysis and provide your single, most impactful directive.
+            Focus on a DIFFERENT specialty than previously targeted if possible.
             {format_instructions}
             """)
         ])
@@ -72,15 +80,30 @@ class CriticAgent:
                     f"    - Justification: {hypo.get('risk_justification', 'N/A')}\n"
                 )
         return formatted_string
+    
+    def _format_previous_feedback(self, critic_history: List[Dict]) -> str:
+        """Format previous critic feedback to help avoid repetition."""
+        if not critic_history:
+            return "None - This is the first iteration."
+        
+        formatted = ""
+        for i, feedback in enumerate(critic_history, 1):
+            formatted += f"\nIteration {i}:\n"
+            formatted += f"  Decision: {feedback.get('decision')}\n"
+            formatted += f"  Target: {feedback.get('target_specialty', 'N/A')}\n"
+            formatted += f"  Feedback: {feedback.get('feedback', 'N/A')}\n"
+        return formatted
 
-    def run(self, patient_summary: str, specialty_groups: Dict) -> Dict:
+    def run(self, patient_summary: str, specialty_groups: Dict, critic_history: List[Dict] = None) -> Dict:
         """Runs the critic agent and returns its structured decision."""
         print("-> Critic Agent is reviewing the analysis for targeted feedback...")
         combined_analysis = self._format_analysis_for_prompt(specialty_groups)
+        previous_feedback = self._format_previous_feedback(critic_history or [])
         
         result = self.chain.invoke({
             "patient_summary": patient_summary,
             "combined_analysis": combined_analysis,
+            "previous_feedback": previous_feedback,
             "format_instructions": self.parser.get_format_instructions(),
         })
         

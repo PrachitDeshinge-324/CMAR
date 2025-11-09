@@ -22,6 +22,7 @@ class CmarState(TypedDict):
     patient_scenario: Dict
     specialty_groups: Dict[str, List[Dict]]
     critic_feedback: Dict
+    critic_history: List[Dict]  # Track all critic feedback across iterations
     refinement_loop_count: int
     final_report: Dict
 
@@ -46,7 +47,11 @@ def build_graph(llm_client: ChatGoogleGenerativeAI, embeddings_client: HuggingFa
         print("\n--- Executing Node: Generate and Group Hypotheses ---")
         patient_scenario = state['patient_scenario']
         specialty_groups = hypothesis_agent.run(patient_scenario)
-        return {"specialty_groups": specialty_groups, "refinement_loop_count": 0}
+        return {
+            "specialty_groups": specialty_groups, 
+            "refinement_loop_count": 0,
+            "critic_history": []  # Initialize critic history
+        }
 
     def run_evidence_evaluation(state: CmarState):
         print("\n--- Executing Node: Sequential Evidence Evaluation ---")
@@ -97,13 +102,32 @@ def build_graph(llm_client: ChatGoogleGenerativeAI, embeddings_client: HuggingFa
         print("\n--- Executing Node: Critic Review ---")
         patient_summary = state['patient_scenario']['summary']
         specialty_groups = state['specialty_groups']
-        decision = critic_agent.run(patient_summary, specialty_groups)
+        critic_history = state.get('critic_history', [])
+        
+        # Pass critic history to avoid repeating same critiques
+        decision = critic_agent.run(patient_summary, specialty_groups, critic_history)
+        
         print(f"-> Critic's Directive: {decision['decision']}")
         if decision['decision'] != 'APPROVE':
             print(f"-> Target: {decision.get('target_specialty')}")
             print(f"-> Justification: {decision.get('feedback')}")
+        
         loop_count = state.get('refinement_loop_count', 0) + 1
-        return {"critic_feedback": decision, "refinement_loop_count": loop_count}
+        
+        # Add iteration number to the decision and append to history
+        critic_feedback_with_iteration = {
+            **decision,
+            'iteration': loop_count
+        }
+        
+        critic_history = state.get('critic_history', [])
+        critic_history.append(critic_feedback_with_iteration)
+        
+        return {
+            "critic_feedback": decision, 
+            "critic_history": critic_history,
+            "refinement_loop_count": loop_count
+        }
         
     # --- NEW NODE FOR DYNAMIC HYPOTHESIS MANAGEMENT ---
     def update_hypotheses(state: CmarState):
