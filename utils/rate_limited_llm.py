@@ -48,9 +48,9 @@ class RateLimitedChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
         # Apply rate limiting BEFORE the API call
         gemini_rate_limiter.acquire()
         
-        # Make the actual API call with retry logic
-        max_retries = 3
-        retry_delay = 2.0
+        # Make the actual API call with FASTER retry logic
+        max_retries = 2  # Reduced from 3 to 2
+        retry_delay = 1.0  # Reduced from 2.0 to 1.0
         
         for attempt in range(max_retries):
             try:
@@ -66,11 +66,17 @@ class RateLimitedChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
                 return result
                 
             except Exception as e:
+                error_msg = str(e).lower()
+                
+                # Don't retry on certain errors
+                if 'invalid' in error_msg or 'authentication' in error_msg or 'permission' in error_msg:
+                    print(f"    ❌ Non-retryable error: {str(e)[:100]}")
+                    raise
+                
                 if attempt < max_retries - 1:
-                    print(f"    ⚠️ LLM call failed (attempt {attempt + 1}/{max_retries}): {str(e)[:100]}")
-                    print(f"    ⏳ Retrying in {retry_delay}s...")
+                    print(f"    ⚠️ Retry {attempt + 1}/{max_retries} in {retry_delay}s...")
                     time.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
+                    retry_delay *= 1.5  # Gentler backoff (1.5x instead of 2x)
                 else:
-                    print(f"    ❌ LLM call failed after {max_retries} attempts: {str(e)[:100]}")
+                    print(f"    ❌ Failed after {max_retries} attempts: {str(e)[:100]}")
                     raise

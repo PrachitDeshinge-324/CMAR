@@ -4,6 +4,8 @@ from pydantic import BaseModel, Field
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_google_genai import ChatGoogleGenerativeAI
 from typing import List, Dict, Optional
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
 
 # Define the structured output for the final report
 class FinalDiagnosis(BaseModel):
@@ -33,8 +35,9 @@ class SynthesizerAgent:
     An agent that synthesizes the complete analysis into a final, ranked report
     ordered by clinical urgency, with disease name mapping and ground truth validation in a single LLM call.
     """
-    def __init__(self, llm: ChatGoogleGenerativeAI):
+    def __init__(self, llm: ChatGoogleGenerativeAI, embeddings_model=None):
         self.llm = llm
+        self.embeddings_model = embeddings_model
         self.system_prompt = """You are a senior medical scribe and rapporteur. Your task is to synthesize a complex, multi-specialty diagnostic analysis into a single, clear, and actionable final report.
 
         The final list of differential diagnoses has already been ranked by a deterministic algorithm based on clinical urgency (severity first, then likelihood).
@@ -113,43 +116,120 @@ class SynthesizerAgent:
             formatted_string += f"Assigned Likelihood: {hypo['likelihood']}\n"
             formatted_string += f"Justification Notes: {hypo.get('risk_justification', 'N/A')}\n"
         return formatted_string
-
-    def _rank_hypotheses(self, specialty_groups: Dict) -> List[Dict]:
+    
+    def _validate_ground_truth_semantic(self, diagnoses: List[Dict], ground_truth: str, top_k: int = 5, similarity_threshold: float = 0.75) -> Dict:
         """
-        Flattens and ranks all hypotheses based on clinical urgency.
-        Ranking Logic: Severity (descending), then Likelihood (descending).
-        """
-        all_hypotheses = []
-        for specialty in specialty_groups:
-            all_hypotheses.extend(specialty_groups[specialty])
-
-        # Filter out any hypotheses that might have failed assessment and lack scores
-        valid_hypotheses = [
-            h for h in all_hypotheses if 'severity' in h and 'likelihood' in h
-        ]
+        Semantic validation using embeddings model for robust medical term matching.
+        Falls back to keyword matching if embeddings model is not available.
         
-        # The key ranking logic: sort by severity, then by likelihood, both descending.
-        ranked_list = sorted(
-            valid_hypotheses,
-            key=lambda x: (x['severity'], x['likelihood']),
-            reverse=True
-        )
-        return ranked_list
-
-    def _format_ranked_list_for_prompt(self, ranked_list: List[Dict]) -> str:
-        """Formats the ranked list into a string for the LLM prompt."""
-        formatted_string = ""
-        for i, hypo in enumerate(ranked_list):
-            formatted_string += f"\n--- Rank {i+1} ---\n"
-            formatted_string += f"Diagnosis: {hypo['hypothesis']}\n"
-            formatted_string += f"Assigned Severity: {hypo['severity']}\n"
-            formatted_string += f"Assigned Likelihood: {hypo['likelihood']}\n"
-            formatted_string += f"Justification Notes: {hypo.get('risk_justification', 'N/A')}\n"
-        return formatted_string
+        Args:
+            diagnoses: List of diagnosis dictionaries
+            ground_truth: The ground truth diagnosis
+            top_k: Number of top diagnoses to check
+            similarity_threshold: Cosine similarity threshold (0.75 = 75% similar)
+        """
+        ground_truth_lower = ground_truth.lower().strip()
+        
+        # If embeddings model is available, use semantic similarity
+        if self.embeddings_model:
+            try:
+                # Embed ground truth
+                gt_embedding = self.embeddings_model.embed_query(ground_truth_lower)
+                gt_embedding = np.array(gt_embedding).reshape(1, -1)
+                
+                # Check each diagnosis in top-K
+                best_match = None
+                best_score = 0.0
+                
+                for i, dx in enumerate(diagnoses[:top_k]):
+                    dx_name = dx['hypothesis']
+                    
+                    # Embed diagnosis name
+                    dx_embedding = self.embeddings_model.embed_query(dx_name.lower())
+                    dx_embedding = np.array(dx_embedding).reshape(1, -1)
+                    
+                    # Calculate cosine similarity
+                    similarity = cosine_similarity(gt_embedding, dx_embedding)[0][0]
+                    
+                    if similarity > best_score:
+                        best_score = similarity
+                        best_match = {
+                            "rank": i + 1,
+                            "diagnosis": dx_name,
+                            "similarity": float(similarity)
+                        }
+                
+                # Check if best match exceeds threshold
+                if best_match and best_score >= similarity_threshold:
+                    return {
+                        "ground_truth": ground_truth,
+                        "is_correct": True,
+                        "best_match_rank": best_match["rank"],
+                        "best_match_diagnosis": best_match["diagnosis"],
+                        "best_match_reasoning": f"Semantic similarity: {best_score:.2%} (threshold: {similarity_threshold:.0%})",
+                    }
+                else:
+                    return {
+                        "ground_truth": ground_truth,
+                        "is_correct": False,
+                        "best_match_rank": best_match["rank"] if best_match else None,
+                        "best_match_diagnosis": best_match["diagnosis"] if best_match else None,
+                        "best_match_reasoning": f"Best similarity: {best_score:.2%}, below threshold {similarity_threshold:.0%}",
+                    }
+                    
+            except Exception as e:
+                print(f"   ⚠️  Semantic validation failed: {e}. Falling back to keyword matching.")
+        
+        # Fallback: Simple keyword matching
+        common_medical_terms = {
+            'drug': ['medication', 'adverse', 'hypersensitivity', 'allergic', 'anaphylaxis', 'reaction'],
+            'heart': ['cardiac', 'myocardial', 'coronary', 'cardiovascular'],
+            'stroke': ['cerebrovascular', 'cva', 'cerebral infarction'],
+            'lung': ['pulmonary', 'respiratory', 'pneumonia', 'copd'],
+            'infection': ['sepsis', 'bacterial', 'viral', 'infectious'],
+        }
+        
+        gt_words = set(ground_truth_lower.split())
+        
+        for i, dx in enumerate(diagnoses[:top_k]):
+            dx_name_lower = dx['hypothesis'].lower()
+            dx_words = set(dx_name_lower.split())
+            
+            # Direct word overlap
+            word_overlap = gt_words & dx_words
+            if len(word_overlap) >= 2:  # At least 2 words match
+                return {
+                    "ground_truth": ground_truth,
+                    "is_correct": True,
+                    "best_match_rank": i + 1,
+                    "best_match_diagnosis": dx['hypothesis'],
+                    "best_match_reasoning": f"Keyword match: {word_overlap}",
+                }
+            
+            # Related terms matching
+            for gt_word in gt_words:
+                if gt_word in common_medical_terms:
+                    related_terms = common_medical_terms[gt_word]
+                    if any(term in dx_name_lower for term in related_terms):
+                        return {
+                            "ground_truth": ground_truth,
+                            "is_correct": True,
+                            "best_match_rank": i + 1,
+                            "best_match_diagnosis": dx['hypothesis'],
+                            "best_match_reasoning": f"Related term match: '{gt_word}' → found related terms in diagnosis",
+                        }
+        
+        return {
+            "ground_truth": ground_truth,
+            "is_correct": False,
+            "best_match_rank": None,
+            "best_match_diagnosis": None,
+            "best_match_reasoning": f"No semantic or keyword matches found in top {top_k}",
+        }
 
     def run(self, patient_summary: str, specialty_groups: Dict, ground_truth: Optional[str] = None, top_k: int = 5) -> Dict:
         """
-        Runs the synthesizer agent to produce the final report with integrated ground truth validation.
+        Optimized synthesizer: Ranking and validation done in Python, LLM only for text generation.
         
         Args:
             patient_summary: Summary of the patient's symptoms
@@ -162,36 +242,29 @@ class SynthesizerAgent:
         """
         print("-> Synthesizing and ranking the final report...")
         
-        # 1. Perform deterministic ranking in Python
+        # 1. Perform deterministic ranking in Python (no LLM needed!)
         ranked_diagnoses_data = self._rank_hypotheses(specialty_groups)
         
-        # 2. Format the ranked list for the LLM to summarize
+        # 2. Perform ground truth validation using semantic similarity (no LLM needed!)
+        validation_result = None
+        if ground_truth:
+            print(f"-> Validating against ground truth: '{ground_truth}'")
+            validation_result = self._validate_ground_truth_semantic(ranked_diagnoses_data, ground_truth, top_k)
+            
+            if validation_result['is_correct']:
+                print(f"   ✅ MATCH FOUND at rank {validation_result['best_match_rank']}: {validation_result['best_match_diagnosis']}")
+            else:
+                print(f"   ❌ NO MATCH in top {top_k}")
+        
+        # 3. Format for LLM - simplified task: only generate general names and justifications
         ranked_diagnoses_prompt_str = self._format_ranked_list_for_prompt(ranked_diagnoses_data)
         
-        # 3. Prepare ground truth instruction
-        if ground_truth:
-            ground_truth_instruction = f"""
-**GROUND TRUTH FOR VALIDATION:**
-The correct diagnosis is: "{ground_truth}"
-
-You MUST:
-1. Check if ANY of the top {top_k} diagnoses match this ground truth (consider both scientific and general names)
-2. For each diagnosis, set 'matches_ground_truth' to true if it matches or is closely related
-3. Fill out the 'ground_truth_validation' section completely with the best match
-
-Examples of matches:
-- "heart attack" matches "Myocardial Infarction" (MI)
-- "smoking addiction" or "tobacco addiction" matches "COPD" or "Chronic Obstructive Pulmonary Disease"
-- "lung infection" matches "Pneumonia"
-- "stroke" matches "Cerebrovascular Accident" (CVA)
-
-Be generous - if there's a clear clinical relationship or the diagnosis is caused by/related to the ground truth, consider it a match.
-"""
-            print(f"-> Validating against ground truth: '{ground_truth}'")
-        else:
-            ground_truth_instruction = "No ground truth provided for this case."
+        # 4. Simplified LLM call - only for text generation, NOT validation
+        ground_truth_instruction = """CRITICAL: Do NOT perform ground truth validation yourself. 
+        Set 'ground_truth_validation' to null in your output. 
+        Validation is handled by a separate semantic similarity algorithm."""
         
-        # 4. Invoke the LLM to generate the report WITH validation in one call
+        print("-> Invoking LLM for report generation...")
         report = self.chain.invoke({
             "patient_summary": patient_summary,
             "ranked_diagnoses": ranked_diagnoses_prompt_str,
@@ -201,13 +274,15 @@ Be generous - if there's a clear clinical relationship or the diagnosis is cause
         
         report_dict = report.dict()
         
-        # 5. Print validation results if available
-        if ground_truth and report_dict.get('ground_truth_validation'):
-            validation = report_dict['ground_truth_validation']
-            if validation['is_correct']:
-                print(f"   ✅ MATCH FOUND at rank {validation['best_match_rank']}: {validation['best_match_diagnosis']}")
-                print(f"      Reasoning: {validation['best_match_reasoning']}")
-            else:
-                print(f"   ❌ NO MATCH in top {top_k}")
+        # 5. Inject Python-validated ground truth results (override any LLM hallucinations)
+        if validation_result:
+            report_dict['ground_truth_validation'] = validation_result
+            
+            # Mark the matching diagnosis
+            if validation_result['is_correct']:
+                for dx in report_dict.get('differential_diagnoses', []):
+                    if dx['diagnosis'] == validation_result['best_match_diagnosis']:
+                        dx['matches_ground_truth'] = True
+                        break
         
         return report_dict

@@ -2,11 +2,14 @@
 """
 Test a single case from the benchmark dataset with ground truth validation.
 """
+import sys
 import yaml
 import json
 from dotenv import load_dotenv
 import os
 from datetime import datetime
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app.graph import build_graph
 from utils.rate_limited_llm import RateLimitedChatGoogleGenerativeAI

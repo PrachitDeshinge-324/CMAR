@@ -48,128 +48,167 @@ def build_graph(llm_client: ChatGoogleGenerativeAI, embeddings_client: HuggingFa
     enable_critic = optimization_config.get('enable_critic_loop', True)
     max_loops = optimization_config.get('max_refinement_loops', 3)
     batch_risk = optimization_config.get('batch_risk_assessment', False)
+    batch_evidence = optimization_config.get('batch_evidence_retrieval', True)  # NEW: enabled by default
     
     print(f"-> Graph optimization settings:")
     print(f"   - Critic loop: {'enabled' if enable_critic else 'DISABLED (saves ~3 API calls/patient)'}")
     print(f"   - Max refinement loops: {max_loops}")
     print(f"   - Batch risk assessment: {'enabled (saves ~9 API calls/patient)' if batch_risk else 'disabled'}")
+    print(f"   - Batch evidence retrieval: {'enabled (saves ~50% retrieval calls)' if batch_evidence else 'disabled'}")
 
     # --- AGENT AND TOOL INITIALIZATION ---
     retriever_tool = StaticRetriever(embeddings=embeddings_client).get_retriever()
     web_search_tool = DuckDuckGoSearchRun()
     hypothesis_agent = HypothesisGenerator(llm_client)
-    evidence_evaluator_agent = EvidenceEvaluatorAgent(retriever_tool=retriever_tool, web_search_tool=web_search_tool)
+    evidence_evaluator_agent = EvidenceEvaluatorAgent(
+        retriever_tool=retriever_tool, 
+        web_search_tool=web_search_tool,
+        enable_batching=batch_evidence  # Pass batching config
+    )
     risk_assessor_agent = RiskAssessorAgent(llm_client)
     critic_agent = CriticAgent(llm_client)
-    synthesizer_agent = SynthesizerAgent(llm_client) 
+    synthesizer_agent = SynthesizerAgent(llm_client, embeddings_model=embeddings_client) 
 
     # --- NODE FUNCTION DEFINITIONS ---
 
     def run_hypothesis_generator(state: CmarState):
+        import time
+        start_time = time.time()
         print("\n--- Executing Node: Generate and Group Hypotheses ---")
         patient_scenario = state['patient_scenario']
         specialty_groups = hypothesis_agent.run(patient_scenario['summary'])
+        
+        # Deduplicate similar hypotheses across specialties
+        seen_hypotheses = {}
+        deduplicated_groups = {}
+        duplicates_removed = 0
+        
+        for specialty, hypotheses in specialty_groups.items():
+            unique_hypotheses = []
+            for hypo in hypotheses:
+                hypo_name_lower = hypo['hypothesis'].lower().strip()
+                
+                # Check if we've seen this or a very similar hypothesis
+                if hypo_name_lower not in seen_hypotheses:
+                    # Store with normalized name
+                    seen_hypotheses[hypo_name_lower] = (specialty, hypo)
+                    unique_hypotheses.append(hypo)
+                else:
+                    duplicates_removed += 1
+            
+            if unique_hypotheses:
+                deduplicated_groups[specialty] = unique_hypotheses
+        
+        if duplicates_removed > 0:
+            print(f"  -> Removed {duplicates_removed} duplicate hypotheses across specialties")
+        
+        elapsed = time.time() - start_time
+        print(f"⏱️  Hypothesis Generation completed in {elapsed:.2f}s")
+        
         return {
-            "specialty_groups": specialty_groups, 
+            "specialty_groups": deduplicated_groups, 
             "refinement_loop_count": 0,
             "critic_history": []
         }
 
     def run_evidence_evaluation(state: CmarState):
-        print("\n--- Executing Node: Sequential Evidence Evaluation ---")
+        import time
+        start_time = time.time()
+        print("\n--- Executing Node: Evidence Evaluation ---")
         patient_summary = state['patient_scenario']['summary']
         specialty_groups = state['specialty_groups']
         critic_feedback = state.get('critic_feedback', {})
         targeted_specialty = critic_feedback.get('target_specialty')
         
         updated_groups = {}
+        tasks = []
         
+        # Collect all specialties that need evaluation
         for specialty, hypotheses in specialty_groups.items():
-            # Check if this specialty was targeted by the critic
             is_critic_target = (specialty == targeted_specialty)
-            
-            # Re-evaluate if:
-            # 1. There are new hypotheses without evidence, OR
-            # 2. This specialty was targeted by the critic (to get fresh evidence)
             hypotheses_to_evaluate = [h for h in hypotheses if 'evidence' not in h]
             
             if hypotheses_to_evaluate or is_critic_target:
                 if is_critic_target and not hypotheses_to_evaluate:
-                    # Critic targeted this specialty - re-evaluate all hypotheses
-                    print(f"  -> Re-evaluating specialty: {specialty} (targeted by critic)")
+                    print(f"  -> Re-evaluating: {specialty} (critic target)")
                     hypotheses_to_evaluate = hypotheses
                 else:
-                    print(f"  -> Evaluating specialty: {specialty} ({len(hypotheses_to_evaluate)} hypotheses)")
+                    print(f"  -> Evaluating: {specialty} ({len(hypotheses_to_evaluate)} hypotheses)")
                 
-                updated_hypotheses = evidence_evaluator_agent.evaluate_hypotheses_for_specialty(
-                    patient_summary, hypotheses_to_evaluate
-                )
-                # Merge back with already evaluated hypotheses
-                evaluated_map = {h['hypothesis']: h for h in updated_hypotheses}
-                final_hypotheses = [evaluated_map.get(h['hypothesis'], h) for h in hypotheses]
-                updated_groups[specialty] = final_hypotheses
+                tasks.append((specialty, hypotheses, hypotheses_to_evaluate))
             else:
                 # Skip if no new hypotheses and not critic target
                 updated_groups[specialty] = hypotheses
         
+        # Process tasks - sequential to avoid tokenizer thread-safety issues
+        # (HuggingFace tokenizer is not thread-safe by default)
+        if tasks:
+            for specialty, all_hypotheses, to_evaluate in tasks:
+                updated = evidence_evaluator_agent.evaluate_hypotheses_for_specialty(
+                    patient_summary, to_evaluate
+                )
+                # Merge with already evaluated hypotheses
+                evaluated_map = {h['hypothesis']: h for h in updated}
+                final = [evaluated_map.get(h['hypothesis'], h) for h in all_hypotheses]
+                updated_groups[specialty] = final
+        
+        elapsed = time.time() - start_time
+        print(f"⏱️  Evidence Evaluation completed in {elapsed:.2f}s")
+        
         return {"specialty_groups": updated_groups}
 
     def run_risk_assessment(state: CmarState):
-        """Node 3: BATCH risk assessment - all specialties in ONE API call to save quota."""
-        print("\n--- Executing Node: Batch Risk Assessment (1 API Call) ---")
+        """
+        Smart batching: Only re-assess targeted specialty or new hypotheses.
+        This prevents redundant API calls by reusing existing risk scores
+        for specialties that weren't modified by the critic.
+        """
+        import time
+        start_time = time.time()
+        print("\n--- Executing Node: Targeted Risk Assessment ---")
         patient_summary = state['patient_scenario']['summary']
         specialty_groups = state['specialty_groups']
         feedback = state.get('critic_feedback', {})
         target_specialty = feedback.get('target_specialty')
-        challenge = feedback.get('feedback', "None. Initial assessment.")
-
-        # Combine ALL specialties into a single API call
-        all_hypotheses = []
-        specialty_map = {}  # Track which hypotheses belong to which specialty
+        
+        updated_groups = {}
+        skipped_count = 0
+        assessed_count = 0
         
         for specialty, hypotheses in specialty_groups.items():
-            for hypo in hypotheses:
-                hypo['_original_specialty'] = specialty  # Temporary marker
-                all_hypotheses.append(hypo)
+            # Check if this specialty needs assessment
+            needs_assessment = any('severity' not in h for h in hypotheses)
+            is_critic_target = (specialty == target_specialty)
+            
+            if needs_assessment or is_critic_target:
+                # Get critic's challenge if this is the targeted specialty
+                challenge = feedback.get('feedback', 'Initial assessment') if is_critic_target else 'Initial assessment'
+                
+                print(f"  -> Assessing {specialty} ({len(hypotheses)} hypotheses)...")
+                if is_critic_target:
+                    print(f"     ⚡ Critic challenge: {challenge[:80]}...")
+                
+                updated_hypotheses = risk_assessor_agent.assess_risk_for_specialty(
+                    patient_summary, 
+                    hypotheses,
+                    challenge
+                )
+                updated_groups[specialty] = updated_hypotheses
+                assessed_count += 1
+            else:
+                # Reuse existing scores - no API call needed!
+                print(f"  -> Skipping {specialty} (already assessed, not targeted by critic)")
+                updated_groups[specialty] = hypotheses
+                skipped_count += 1
         
-        # Single batched API call for all hypotheses
-        try:
-            print(f"  -> Assessing {len(all_hypotheses)} hypotheses across {len(specialty_groups)} specialties in 1 API call...")
-            updated_all = risk_assessor_agent.assess_risk_for_specialty(
-                patient_summary, 
-                all_hypotheses, 
-                f"Target specialty: {target_specialty}. Challenge: {challenge}" if target_specialty else "None. Initial assessment."
-            )
-            
-            # Re-group by specialty
-            updated_groups = {}
-            for hypo in updated_all:
-                specialty = hypo.pop('_original_specialty')  # Remove temporary marker
-                if specialty not in updated_groups:
-                    updated_groups[specialty] = []
-                updated_groups[specialty].append(hypo)
-            
-            print(f"  ✅ Batch risk assessment completed successfully")
-            
-        except Exception as exc:
-            print(f"  ⚠️ Batch risk assessment encountered an error: {str(exc)[:200]}")
-            # Fallback to default scores
-            updated_groups = {}
-            for specialty, hypotheses in specialty_groups.items():
-                fallback_hypotheses = []
-                for hypo in hypotheses:
-                    if 'severity' not in hypo:
-                        hypo['severity'] = 5
-                    if 'likelihood' not in hypo:
-                        hypo['likelihood'] = 5
-                    if 'risk_justification' not in hypo:
-                        hypo['risk_justification'] = f"Risk assessment failed: {str(exc)[:100]}"
-                    fallback_hypotheses.append(hypo)
-                updated_groups[specialty] = fallback_hypotheses
-        
+        elapsed = time.time() - start_time
+        print(f"  ✓ Assessed: {assessed_count} specialties | Skipped: {skipped_count} specialties")
+        print(f"⏱️  Risk Assessment completed in {elapsed:.2f}s")
         return {"specialty_groups": updated_groups}
 
     def run_critic(state: CmarState):
+        import time
+        start_time = time.time()
         print("\n--- Executing Node: Critic Review ---")
         patient_summary = state['patient_scenario']['summary']
         specialty_groups = state['specialty_groups']
@@ -194,6 +233,9 @@ def build_graph(llm_client: ChatGoogleGenerativeAI, embeddings_client: HuggingFa
         critic_history = state.get('critic_history', [])
         critic_history.append(critic_feedback_with_iteration)
         
+        elapsed = time.time() - start_time
+        print(f"⏱️  Critic Review completed in {elapsed:.2f}s")
+        
         return {
             "critic_feedback": decision, 
             "critic_history": critic_history,
@@ -202,7 +244,12 @@ def build_graph(llm_client: ChatGoogleGenerativeAI, embeddings_client: HuggingFa
         
     # --- NEW NODE FOR DYNAMIC HYPOTHESIS MANAGEMENT ---
     def update_hypotheses(state: CmarState):
-        """Node that acts on the critic's directive to add or remove hypotheses."""
+        """
+        Node that acts on the critic's directive to add or remove hypotheses.
+        Enhanced to mark hypotheses that need re-evaluation for downstream optimization.
+        """
+        import time
+        start_time = time.time()
         print("\n--- Executing Node: Update Hypotheses List ---")
         feedback = state.get('critic_feedback', {})
         decision = feedback.get('decision')
@@ -213,8 +260,11 @@ def build_graph(llm_client: ChatGoogleGenerativeAI, embeddings_client: HuggingFa
             new_hypo_name = feedback.get('new_hypothesis_name')
             if target_specialty and new_hypo_name and target_specialty in specialty_groups:
                 print(f"-> Adding '{new_hypo_name}' to {target_specialty}.")
+                # Mark new hypothesis as needing evaluation
                 specialty_groups[target_specialty].append({
-                    "hypothesis": new_hypo_name, "specialty": target_specialty
+                    "hypothesis": new_hypo_name, 
+                    "specialty": target_specialty,
+                    "_needs_evaluation": True  # Flag for evidence evaluator
                 })
         elif decision == "DISCARD_HYPOTHESIS":
             hypo_to_discard = feedback.get('hypothesis_to_discard')
@@ -223,13 +273,24 @@ def build_graph(llm_client: ChatGoogleGenerativeAI, embeddings_client: HuggingFa
                 specialty_groups[target_specialty] = [
                     h for h in specialty_groups[target_specialty] if h['hypothesis'] != hypo_to_discard
                 ]
+        elif decision == "CHALLENGE_SCORE":
+            # Mark the challenged specialty's hypotheses for re-assessment
+            if target_specialty and target_specialty in specialty_groups:
+                print(f"-> Marking {target_specialty} for re-assessment due to challenge.")
+                for hypo in specialty_groups[target_specialty]:
+                    hypo['_needs_reassessment'] = True  # Flag for risk assessor
         else:
             print("-> No changes to hypothesis list required.")
+        
+        elapsed = time.time() - start_time
+        print(f"⏱️  Update Hypotheses completed in {elapsed:.2f}s")
 
         return {"specialty_groups": specialty_groups}
     
     def run_synthesizer(state: CmarState):
         """Node 5: Ranks the final hypotheses and generates the final report."""
+        import time
+        start_time = time.time()
         print("\n--- Executing Node: Synthesizer ---")
         patient_summary = state['patient_scenario']['summary']
         specialty_groups = state['specialty_groups']
@@ -242,6 +303,8 @@ def build_graph(llm_client: ChatGoogleGenerativeAI, embeddings_client: HuggingFa
             ground_truth=ground_truth
         )
         
+        elapsed = time.time() - start_time
+        print(f"⏱️  Synthesizer completed in {elapsed:.2f}s")
         print("\n--- FINAL REPORT GENERATED ---")
         return {"final_report": report}
 
@@ -252,6 +315,19 @@ def build_graph(llm_client: ChatGoogleGenerativeAI, embeddings_client: HuggingFa
         # Check if critic loop is disabled
         if not enable_critic:
             print("-> Critic loop DISABLED. Proceeding directly to Synthesizer.")
+            return "synthesize"
+        
+        # Check for high-confidence diagnosis (adaptive early stopping)
+        specialty_groups = state.get('specialty_groups', {})
+        high_confidence_count = 0
+        for specialty, hypotheses in specialty_groups.items():
+            for hypo in hypotheses:
+                if hypo.get('severity', 0) >= 9 and hypo.get('likelihood', 0) >= 9:
+                    high_confidence_count += 1
+        
+        # If we have 2+ high-confidence diagnoses and critic approved, stop early
+        if high_confidence_count >= 2 and state['critic_feedback']['decision'] == 'APPROVE':
+            print(f"-> ⚡ Early stop: {high_confidence_count} high-confidence diagnoses. Proceeding to Synthesizer.")
             return "synthesize"
         
         if state.get('refinement_loop_count', 0) >= max_loops:

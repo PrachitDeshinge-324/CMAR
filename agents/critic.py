@@ -93,17 +93,49 @@ class CriticAgent:
             formatted += f"  Target: {feedback.get('target_specialty', 'N/A')}\n"
             formatted += f"  Feedback: {feedback.get('feedback', 'N/A')}\n"
         return formatted
+    
+    def _get_targeted_specialties(self, critic_history: List[Dict]) -> set:
+        """Extract all specialties that have already been targeted by the critic."""
+        if not critic_history:
+            return set()
+        return {h.get('target_specialty') for h in critic_history if h.get('target_specialty')}
+    
+    def _get_untargeted_specialties(self, specialty_groups: Dict, critic_history: List[Dict]) -> List[str]:
+        """Get list of specialties that haven't been reviewed yet."""
+        all_specialties = set(specialty_groups.keys())
+        targeted = self._get_targeted_specialties(critic_history)
+        untargeted = all_specialties - targeted
+        return list(untargeted)
 
     def run(self, patient_summary: str, specialty_groups: Dict, critic_history: List[Dict] = None) -> Dict:
-        """Runs the critic agent and returns its structured decision."""
+        """Runs the critic agent with structural memory to ensure specialty diversity."""
         print("-> Critic Agent is reviewing the analysis for targeted feedback...")
+        
+        # Build specialty guidance for the LLM
+        targeted_specialties = self._get_targeted_specialties(critic_history or [])
+        untargeted_specialties = self._get_untargeted_specialties(specialty_groups, critic_history or [])
+        
+        if targeted_specialties:
+            print(f"   Previously reviewed: {', '.join(sorted(targeted_specialties))}")
+        if untargeted_specialties:
+            print(f"   Not yet reviewed: {', '.join(sorted(untargeted_specialties))}")
+        
+        # Build enhanced guidance string
+        specialty_guidance = ""
+        if untargeted_specialties:
+            specialty_guidance = f"\n\n**PRIORITY: Focus on these UNTARGETED specialties:** {', '.join(untargeted_specialties)}"
+            specialty_guidance += "\nYou should target one of these unless a critical issue exists in an already-reviewed specialty."
+        elif targeted_specialties:
+            specialty_guidance = f"\n\n**NOTE: All specialties have been reviewed at least once.**"
+            specialty_guidance += "\nOnly provide additional feedback if a critical issue remains unaddressed."
+        
         combined_analysis = self._format_analysis_for_prompt(specialty_groups)
         previous_feedback = self._format_previous_feedback(critic_history or [])
         
         result = self.chain.invoke({
             "patient_summary": patient_summary,
             "combined_analysis": combined_analysis,
-            "previous_feedback": previous_feedback,
+            "previous_feedback": previous_feedback + specialty_guidance,
             "format_instructions": self.parser.get_format_instructions(),
         })
         

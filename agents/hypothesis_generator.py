@@ -23,12 +23,14 @@ class HypothesisGenerator:
     def __init__(self, llm: ChatGoogleGenerativeAI):
         self.llm = llm
         # --- THIS IS THE KEY CHANGE ---
-        self.system_prompt = """You are an expert medical diagnostician. Your role is to analyze a patient scenario and generate a broad list of potential differential diagnoses.
+        self.system_prompt = """You are an expert medical diagnostician. Your role is to analyze a patient scenario and generate a focused list of the MOST LIKELY differential diagnoses.
 
         **CRITICAL INSTRUCTIONS:**
-        1.  **Think Broadly:** Consider possibilities from all relevant medical specialties.
-        2.  **Consider Both Acute and Chronic Conditions:** A patient's history (like 'history of alcohol abuse') can suggest long-term, chronic diseases (like Cirrhosis or Chronic Bronchitis) in addition to acute emergencies (like Pancreatitis or Overdose). You MUST include both types of possibilities in your differential.
-        3.  **Assign Specialty:** For each hypothesis, identify the primary medical specialty.
+        1.  **Focus on Most Relevant:** Generate 8-12 total hypotheses across the MOST relevant specialties (aim for 6-8 specialties maximum).
+        2.  **Prioritize by Likelihood:** Focus on diagnoses that best match the patient's symptoms and context.
+        3.  **Consider Both Acute and Chronic Conditions:** Include both immediate concerns and underlying conditions when relevant.
+        4.  **Assign Specialty:** For each hypothesis, identify the primary medical specialty (e.g., Cardiology, Neurology, Internal Medicine).
+        5.  **Quality over Quantity:** It's better to have fewer, highly relevant diagnoses than many unlikely ones.
         """
         self.parser = PydanticOutputParser(pydantic_object=HypothesisList)
         self.prompt = ChatPromptTemplate.from_messages([

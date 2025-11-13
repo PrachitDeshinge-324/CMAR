@@ -25,6 +25,7 @@ class RateLimiter:
         """
         Blocks until a call can be made without exceeding the rate limit.
         Call this before making an API request.
+        Optimized: Minimal blocking, smarter wait calculation.
         """
         with self.lock:
             now = time.time()
@@ -35,9 +36,15 @@ class RateLimiter:
             
             # If we're at the limit, wait until the oldest call expires
             if len(self.calls) >= self.max_calls:
-                sleep_time = self.calls[0] + self.time_window - now + 0.1  # Small buffer
-                if sleep_time > 0:
-                    print(f"    ⏳ Rate limit reached ({len(self.calls)}/{self.max_calls} calls). Waiting {sleep_time:.1f}s...")
+                # Calculate minimum wait time needed
+                oldest_call = self.calls[0]
+                wait_needed = oldest_call + self.time_window - now
+                
+                if wait_needed > 0:
+                    # Add minimal buffer (0.05s instead of 0.1s)
+                    sleep_time = wait_needed + 0.05
+                    if sleep_time > 1.0:  # Only print if significant wait
+                        print(f"    ⏳ Rate limit: waiting {sleep_time:.1f}s...")
                     time.sleep(sleep_time)
                     
                     # Clean up expired calls after waiting
@@ -46,7 +53,7 @@ class RateLimiter:
                         self.calls.popleft()
             
             # Record this call
-            self.calls.append(time.time())
+            self.calls.append(now)
     
     def reset(self) -> None:
         """Reset the rate limiter state."""
