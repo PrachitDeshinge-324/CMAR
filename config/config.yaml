@@ -2,7 +2,7 @@
 # IMPORTANT: Replace "YOUR_GEMINI_API_KEY" with your actual Google AI Studio API key.
 # You can also set this as an environment variable named GOOGLE_API_KEY.
 gemini:
-  api_key: "AIzaSyAVBAfM7qpGZF1XFAKWPiFsUXlCkwWAwk0"
+  api_key: "Your API KEY"
   generation_model: "gemini-2.5-flash-lite"
   # Rate limiting configuration (Gemini Flash allows 15 RPM on free tier, 1000 RPD)
   # Optimized: Use 14 for maximum speed while staying within limits
@@ -22,4 +22,4 @@ embeddings:
   model: "models/text-embedding-004"
   # The API key can be the same one used for generation.
   # The code will prioritize the GOOGLE_API_KEY environment variable if it's set.
-  api_key: "AIzaSyCNlTy22YAn3GFceFwc-U0RRy1VMtZFPjA"
+  api_key: "Can be same as above"
