@@ -72,24 +72,41 @@ class RiskAssessorAgent:
         # Format the input for the LLM
         hypotheses_with_evidence = self._format_hypotheses_for_prompt(hypotheses)
         
-        # Invoke the LLM chain
-        result = self.chain.invoke({
-            "patient_summary": patient_summary,
-            "hypotheses_with_evidence": hypotheses_with_evidence,
-            "format_instructions": self.parser.get_format_instructions(),
-            "critic_challenge": critic_challenge, # <-- Pass to prompt
-        })
+        try:
+            # Invoke the LLM chain
+            result = self.chain.invoke({
+                "patient_summary": patient_summary,
+                "hypotheses_with_evidence": hypotheses_with_evidence,
+                "format_instructions": self.parser.get_format_instructions(),
+                "critic_challenge": critic_challenge, # <-- Pass to prompt
+            })
 
-        # Integrate the new scores back into the original hypothesis objects
-        assessment_map = {assessment.hypothesis: assessment for assessment in result.assessments}
-        
-        updated_hypotheses = []
-        for hypo in hypotheses:
-            assessment = assessment_map.get(hypo['hypothesis'])
-            if assessment:
-                hypo['severity'] = assessment.severity
-                hypo['likelihood'] = assessment.likelihood
-                hypo['risk_justification'] = assessment.justification
-            updated_hypotheses.append(hypo)
-        
-        return updated_hypotheses
+            # Integrate the new scores back into the original hypothesis objects
+            assessment_map = {assessment.hypothesis: assessment for assessment in result.assessments}
+            
+            updated_hypotheses = []
+            for hypo in hypotheses:
+                assessment = assessment_map.get(hypo['hypothesis'])
+                if assessment:
+                    hypo['severity'] = assessment.severity
+                    hypo['likelihood'] = assessment.likelihood
+                    hypo['risk_justification'] = assessment.justification
+                else:
+                    # If no assessment found, provide default values
+                    hypo['severity'] = 5
+                    hypo['likelihood'] = 5
+                    hypo['risk_justification'] = "Assessment not available - using default scores."
+                updated_hypotheses.append(hypo)
+            
+            return updated_hypotheses
+            
+        except Exception as e:
+            print(f"    ⚠️ Error during risk assessment: {str(e)[:200]}")
+            # Return hypotheses with default scores
+            updated_hypotheses = []
+            for hypo in hypotheses:
+                hypo['severity'] = 5
+                hypo['likelihood'] = 5
+                hypo['risk_justification'] = f"Risk assessment failed - using default scores. Error: {str(e)[:100]}"
+                updated_hypotheses.append(hypo)
+            return updated_hypotheses

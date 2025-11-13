@@ -35,14 +35,15 @@ class RateLimiter:
             
             # If we're at the limit, wait until the oldest call expires
             if len(self.calls) >= self.max_calls:
-                sleep_time = self.calls[0] + self.time_window - now + 0.05  # Reduced buffer
-                print(f"    ⏳ Rate limit reached. Waiting {sleep_time:.1f}s before next call...")
-                time.sleep(sleep_time)
-                
-                # Clean up expired calls after waiting
-                now = time.time()
-                while self.calls and self.calls[0] <= now - self.time_window:
-                    self.calls.popleft()
+                sleep_time = self.calls[0] + self.time_window - now + 0.1  # Small buffer
+                if sleep_time > 0:
+                    print(f"    ⏳ Rate limit reached ({len(self.calls)}/{self.max_calls} calls). Waiting {sleep_time:.1f}s...")
+                    time.sleep(sleep_time)
+                    
+                    # Clean up expired calls after waiting
+                    now = time.time()
+                    while self.calls and self.calls[0] <= now - self.time_window:
+                        self.calls.popleft()
             
             # Record this call
             self.calls.append(time.time())

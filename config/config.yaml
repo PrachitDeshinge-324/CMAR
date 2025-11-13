@@ -2,13 +2,19 @@
 # IMPORTANT: Replace "YOUR_GEMINI_API_KEY" with your actual Google AI Studio API key.
 # You can also set this as an environment variable named GOOGLE_API_KEY.
 gemini:
-  api_key: "AIzaSyAVBAfM7qpGZF1XFAKWPiFsUXlCkwWAwk0"
+  api_key: "AIzaSyCNlTy22YAn3GFceFwc-U0RRy1VMtZFPjA"
   generation_model: "gemini-2.5-flash"
   # Rate limiting configuration (Gemini free tier allows 10 requests/minute)
   # Optimized: Use 9 for better performance while staying safe
   rate_limit:
     max_calls: 9
     time_window: 60  # seconds
+  
+  # API call optimization settings
+  optimization:
+    enable_critic_loop: true  # Set to false to save API calls (reduces accuracy but saves ~3 calls/patient)
+    max_refinement_loops: 3    # Maximum refinement iterations (default 3, reduce to save calls)
+    batch_risk_assessment: true  # Batch all risk assessments into 1 call (saves ~9 calls/patient)
 
 embeddings:
   provider: "google"
@@ -16,4 +22,4 @@ embeddings:
   model: "models/text-embedding-004"
   # The API key can be the same one used for generation.
   # The code will prioritize the GOOGLE_API_KEY environment variable if it's set.
-  api_key: "AIzaSyAVBAfM7qpGZF1XFAKWPiFsUXlCkwWAwk0"
+  api_key: "AIzaSyCNlTy22YAn3GFceFwc-U0RRy1VMtZFPjA"

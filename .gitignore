@@ -82,3 +82,5 @@ models/
 *.pkl
 *.faiss
 *.zip
+*.json
+*.jsonl

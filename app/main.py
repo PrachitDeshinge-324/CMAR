@@ -31,10 +31,14 @@ def main():
     llm = RateLimitedChatGoogleGenerativeAI(
         model=config['gemini']['generation_model'], 
         google_api_key=api_key, 
-        temperature=0
+        temperature=0,
+        timeout=90,  # 90 second timeout for API calls
+        max_retries=2  # Retry failed calls
     )
     print(f"-> Rate limiter enabled ({rate_config['max_calls']} requests per {rate_config['time_window']}s)")
 
+    # Get optimization config
+    optimization_config = config['gemini'].get('optimization', {})
     
     print("-> Initializing local embeddings model for RAG (this may take a moment)...")
     embeddings = HuggingFaceEmbeddings(
@@ -44,7 +48,7 @@ def main():
     )
     print("-> Embeddings model loaded.")
     
-    app = build_graph(llm_client=llm, embeddings_client=embeddings)
+    app = build_graph(llm_client=llm, embeddings_client=embeddings, optimization_config=optimization_config)
 
     with open('data/patient_scenarios/scenario_1.json', 'r') as f:
         patient_scenario = json.load(f)
