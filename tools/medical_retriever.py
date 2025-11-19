@@ -6,7 +6,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 
 # This path MUST match the name of the folder you unzipped from Colab
-VECTOR_STORE_PATH = "vector_store/faiss_pubmed_full_large_model"
+VECTOR_STORE_PATH = "faiss_pubmed_full_large_model"
 
 class StaticRetriever:
     """

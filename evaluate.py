@@ -65,7 +65,7 @@ def initialize_models_and_graph():
 
     print("-> Initializing local embeddings model for RAG...")
     embeddings = HuggingFaceEmbeddings(
-        model_name="BAAI/bge-large-en-v1.5",
+        model_name="NeuML/pubmedbert-base-embeddings",
         model_kwargs={'device': 'mps'},
         encode_kwargs={'normalize_embeddings': True}
     )

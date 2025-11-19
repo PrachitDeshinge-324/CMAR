@@ -2,12 +2,12 @@
 # requirements.txt
 # ===========================
 # Core libraries for stateful, multi-agent, and LLM applications
-langgraph                   # For building stateful, multi-agent workflows
-langchain                  # Core LangChain abstractions
-langchain-core             # LangChain core utilities
-langchain-community        # Community-contributed LangChain integrations
-langchain-huggingface      # HuggingFace integration for LangChain
-langchain-google-genai     # Google Gemini models integration for LangChain
+langgraph==1.0.2                   # For building stateful, multi-agent workflows
+langchain==1.0.3                  # Core LangChain abstractions
+langchain-core==1.0.3             # LangChain core utilities
+langchain-community==0.4.1        # Community-contributed LangChain integrations
+langchain-huggingface==1.0.1       # HuggingFace integration for LangChain
+langchain-google-genai==3.0.1     # Google Gemini models integration for LangChain
 
 # Environment and configuration management
 pyyaml                     # For YAML configuration files
@@ -23,6 +23,8 @@ tiktoken                   # Tokenizer for text splitting
 duckduckgo-search          # DuckDuckGo web search integration
 sentence-transformers      # Sentence embeddings (HuggingFace models)
 ddgs                       # Alternative DuckDuckGo search API
+beautifulsoup4             # XML/HTML parsing
+lxml                       # XML parser for BeautifulSoup
 
 # App and UI
 streamlit                  # Web app framework for Python

@@ -5,9 +5,8 @@ from langchain_core.output_parsers import PydanticOutputParser
 from langchain_google_genai import ChatGoogleGenerativeAI
 from typing import List, Dict, Literal, Optional
 
-# Define the new, more powerful structured output for the critic's decision
 class CriticDecision(BaseModel):
-    decision: Literal["APPROVE", "CHALLENGE_SCORE", "ADD_HYPOTHESIS", "DISCARD_HYPOTHESIS"] = Field(
+    decision: Literal["APPROVE", "CHALLENGE_SCORE", "ADD_HYPOTHESIS", "DISCARD_HYPOTHESIS", "ASK_HUMAN"] = Field(
         description="The specific action the critic has decided to take."
     )
     target_specialty: Optional[str] = Field(
@@ -22,6 +21,9 @@ class CriticDecision(BaseModel):
     hypothesis_to_discard: Optional[str] = Field(
         description="The exact name of the hypothesis to discard. Only required if decision is DISCARD_HYPOTHESIS."
     )
+    questions_for_human: Optional[List[str]] = Field(
+        description="A list of the MOST CRITICAL questions (Max 5) to ask the clinician. Required if decision is ASK_HUMAN."
+    )
 
 class CriticAgent:
     """
@@ -30,34 +32,26 @@ class CriticAgent:
     """
     def __init__(self, llm: ChatGoogleGenerativeAI):
         self.llm = llm
-        self.system_prompt = """You are a meticulous Chief Medical Officer. Your goal is to find the single most impactful weakness in the current diagnostic analysis and issue a precise directive to fix it.
+        self.system_prompt = """You are a meticulous Diagnostic Reviewer. Your goal is to ensure the differential diagnosis is rigorous, logically sound, and clinically safe.
 
-        Review the patient's situation and the specialists' findings. Choose ONE of the following actions:
+        Review the patient's scenario and the specialists' list of hypotheses. Choose ONE action:
 
-        1.  **APPROVE**: If the analysis is sound and comprehensive.
-        2.  **CHALLENGE_SCORE**: If a likelihood/severity score seems wrong. Ask a targeted counterfactual question to a specific specialty.
-            (Example: target='Cardiology', feedback='You rated MI likelihood high, but what if the intermittent nature of the pain makes angina more likely?')
-        3.  **ADD_HYPOTHESIS**: If a plausible diagnosis is missing. Specify the new hypothesis and the specialty to add it to.
-            (Example: target='Gastroenterology', new_hypothesis='Esophagitis', feedback='The evidence points to esophageal issues, but Esophagitis itself has not been considered.')
-        4.  **DISCARD_HYPOTHESIS**: If a diagnosis is clearly unsupported or redundant. Specify the hypothesis to remove.
-            (Example: target='Musculoskeletal', hypothesis_to_discard='Costochondritis', feedback='The evidence found has zero relevance to this diagnosis, making it noise.')
+        1.  **APPROVE**: If the diagnosis is solid and supported by evidence.
+        2.  **ASK_HUMAN**: **CRITICAL USE ONLY.** Use this if the case is ambiguous.
+            - **CHECK FIRST:** Look at the *Patient Scenario* text. If you see the tag **'[Clinician Responses]'**, you have ALREADY asked the human. You are **FORBIDDEN** from using ASK_HUMAN again. You must make a decision with the info you have.
+            - **WHEN TO ASK:** - If the *Chief Complaint* is broad (e.g., "Chest Pain", "Abdominal Pain") and lacks **OPQRST** details (Onset, Provocation, Quality, Radiation, Severity, Time), you **MUST** ask.
+              - **Example:** "Intermittent Chest Pain" is too vague. You need to know: "Is it exertional? Relieved by rest? Radiating?"
+              - **Vitals are NOT enough:** Even if BP/HR are provided, if the *history* is vague, you must ask.
+            - **STRICT LIMIT:** Ask **Max 3-5** high-yield questions. Do not ask generic "Any other symptoms?" questions.
+        3.  **ADD_HYPOTHESIS**: If a major, high-probability diagnosis is missing.
+        4.  **CHALLENGE_SCORE**: If a score is contradicted by key facts.
+        5.  **DISCARD_HYPOTHESIS**: If a diagnosis is anatomically impossible or ruled out.
 
-        **CRITICAL - CHECK FOR MISSING CHRONIC/LIFESTYLE CONDITIONS:**
-        Before approving, verify that the differential includes BOTH acute and chronic conditions when relevant:
-        - **Patient with alcohol/drug abuse history + respiratory symptoms** → Check for: Chronic Bronchitis, COPD, Aspiration Pneumonia, Chronic Lung Disease
-        - **Patient with smoking history** → Check for: COPD, Chronic Bronchitis, Lung Cancer
-        - **Patient with testicular swelling + infertility concerns** → Check for: Varicocele, Hydrocele, Spermatocele
-        - **Patient with diabetes** → Check for: Diabetic Neuropathy, Nephropathy, Retinopathy
-        - **Patient with chronic GI symptoms** → Check for: IBD, Chronic Gastritis, Peptic Ulcer Disease
-        
-        If a common chronic condition related to patient history is missing, use ADD_HYPOTHESIS to include it.
-
-        IMPORTANT: 
-        - Your directive must be targeted to a single specialty.
-        - Review your previous feedback to avoid repeating the same critiques.
-        - Target DIFFERENT specialties across iterations to ensure comprehensive review.
-        - If you've already challenged a specialty, consider other specialties unless critical issues remain.
-        - Prioritize adding missing chronic/lifestyle-related conditions over challenging scores.
+        **PRIORITY SEQUENCE:**
+        1. **One-Shot Check:** Does `[Clinician Responses]` exist? -> If YES, **STOP ASKING**.
+        2. **Ambiguity Check:** Is the HPI (History of Present Illness) missing OPQRST details for the main symptom? -> **ASK_HUMAN**.
+        3. **Safety Check:** Are red flags for life-threatening conditions (e.g., "Tearing pain" for dissection) unchecked? -> **ASK_HUMAN**.
+        4. Otherwise -> Proceed with standard review.
         """
         self.parser = PydanticOutputParser(pydantic_object=CriticDecision)
         self.prompt = ChatPromptTemplate.from_messages([
@@ -66,14 +60,13 @@ class CriticAgent:
             **Patient Scenario:**
             {patient_summary}
 
-            **Previous Feedback (avoid repeating):**
+            **Previous Feedback:**
             {previous_feedback}
 
             **Current Analysis from Specialists:**
             {combined_analysis}
 
-            Review the analysis and provide your single, most impactful directive.
-            Focus on a DIFFERENT specialty than previously targeted if possible.
+            Review the analysis. Remember: If `[Clinician Responses]` is present, do NOT ask again.
             {format_instructions}
             """)
         ])
@@ -120,25 +113,7 @@ class CriticAgent:
 
     def run(self, patient_summary: str, specialty_groups: Dict, critic_history: List[Dict] = None) -> Dict:
         """Runs the critic agent with structural memory to ensure specialty diversity."""
-        print("-> Critic Agent is reviewing the analysis for targeted feedback...")
-        
-        # Build specialty guidance for the LLM
-        targeted_specialties = self._get_targeted_specialties(critic_history or [])
-        untargeted_specialties = self._get_untargeted_specialties(specialty_groups, critic_history or [])
-        
-        if targeted_specialties:
-            print(f"   Previously reviewed: {', '.join(sorted(targeted_specialties))}")
-        if untargeted_specialties:
-            print(f"   Not yet reviewed: {', '.join(sorted(untargeted_specialties))}")
-        
-        # Build enhanced guidance string
-        specialty_guidance = ""
-        if untargeted_specialties:
-            specialty_guidance = f"\n\n**PRIORITY: Focus on these UNTARGETED specialties:** {', '.join(untargeted_specialties)}"
-            specialty_guidance += "\nYou should target one of these unless a critical issue exists in an already-reviewed specialty."
-        elif targeted_specialties:
-            specialty_guidance = f"\n\n**NOTE: All specialties have been reviewed at least once.**"
-            specialty_guidance += "\nOnly provide additional feedback if a critical issue remains unaddressed."
+        print("-> Critic Agent is reviewing the analysis...")
         
         combined_analysis = self._format_analysis_for_prompt(specialty_groups)
         previous_feedback = self._format_previous_feedback(critic_history or [])
@@ -146,7 +121,7 @@ class CriticAgent:
         result = self.chain.invoke({
             "patient_summary": patient_summary,
             "combined_analysis": combined_analysis,
-            "previous_feedback": previous_feedback + specialty_guidance,
+            "previous_feedback": previous_feedback,
             "format_instructions": self.parser.get_format_instructions(),
         })
         

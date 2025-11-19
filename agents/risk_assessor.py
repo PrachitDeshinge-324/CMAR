@@ -24,14 +24,17 @@ class RiskAssessorAgent:
     """
     def __init__(self, llm: ChatGoogleGenerativeAI):
         self.llm = llm
-        self.system_prompt = """You are an expert clinical risk analyst. Your task is to assess the potential risk of several medical hypotheses based ONLY on the provided evidence and the patient's specific scenario.
+        self.system_prompt = """You are an expert clinical diagnostician. Your task is to assess the probability that a specific hypothesis is the CORRECT diagnosis for the patient.
 
         **CRITICAL INSTRUCTIONS:**
-        1.  **DO NOT use external knowledge or statistical probabilities.** Your assessment must be derived *exclusively* from the context I provide.
-        2.  **Assess Severity:** How dangerous is this condition if it's true? (1=mild, 10=life-threatening).
-        3.  **Assess Likelihood:** For this specific patient, given their summary and the evidence found, how likely is this diagnosis? (1=very unlikely, 10=very likely).
-        4.  Provide a concise justification for your scores, linking the evidence to the patient's situation.
+        1.  **Integrate Medical Knowledge:** You MUST combine the provided patient evidence with your internal knowledge of epidemiology, prevalence, and clinical presentation.
+        2.  **Assess Likelihood (1-10):** How well does this diagnosis explain the *entire* clinical picture? 
+            - 10 = "Textbook presentation", highly probable, explains all key symptoms.
+            - 1 = Unlikely, contradicted by key findings, or epidemiologically rare without specific risk factors.
+        3.  **Assess Severity (1-10):** (Standard medical severity).
+        4.  **Differentiation:** If multiple hypotheses are similar, penalize the ones that miss a key "discriminating feature" present in the patient summary.
         """
+        
         self.parser = PydanticOutputParser(pydantic_object=RiskAssessmentList)
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", self.system_prompt),

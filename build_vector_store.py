@@ -4,16 +4,17 @@ import re
 import yaml
 import time
 import requests
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 from datasets import load_dataset
 from langchain_core.documents import Document
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # --- Configuration ---
-VECTOR_STORE_PATH = "vector_store/faiss_pubmed_combined"
+VECTOR_STORE_PATH = "vector_store/faiss_pubmed_full_large_model" # Updated path for new model
 # Let's process the first 200 questions from PubMedQA to find related PMC articles.
 # This keeps the build time reasonable. You can increase this number for a more comprehensive DB.
 MAX_PQA_QUESTIONS_TO_PROCESS = 200
@@ -74,19 +75,31 @@ def fetch_pmc_articles_for_pqa(pqa_dataset):
             fetch_response.raise_for_status()
             time.sleep(0.4)
             
-            # 3. Basic XML parsing to extract text content
+            # 3. Robust XML parsing with BeautifulSoup
             full_text = fetch_response.text
-            # Use regex to find content within body tags, then strip HTML tags
-            body_content = re.search(r'<body>(.*?)</body>', full_text, re.DOTALL)
-            if body_content:
-                clean_text = re.sub('<[^<]+?>', '', body_content.group(1)).strip()
-                # Create one document per fetched article
-                doc = Document(
-                    page_content=clean_text,
-                    metadata={"source": "PubMed Central", "query": query, "pmcid": pmc_ids[0]}
-                )
-                pmc_documents.append(doc)
-                print(f"  -> Successfully processed and added article {pmc_ids[0]}.")
+            try:
+                soup = BeautifulSoup(full_text, 'xml')
+                # Extract text from the body, or fallback to the whole article if body not found
+                body_content = soup.find('body')
+                if body_content:
+                    clean_text = body_content.get_text(separator=' ', strip=True)
+                else:
+                    # Fallback: try to get all text if no body tag (some XML formats differ)
+                    clean_text = soup.get_text(separator=' ', strip=True)
+                
+                if clean_text:
+                    # Create one document per fetched article
+                    doc = Document(
+                        page_content=clean_text,
+                        metadata={"source": "PubMed Central", "query": query, "pmcid": pmc_ids[0]}
+                    )
+                    pmc_documents.append(doc)
+                    print(f"  -> Successfully processed and added article {pmc_ids[0]}.")
+                else:
+                    print(f"  -> Warning: Extracted empty text for article {pmc_ids[0]}.")
+
+            except Exception as e:
+                print(f"  -> Error parsing XML for {pmc_ids[0]}: {e}")
 
         except requests.RequestException as e:
             print(f"  -> Error during API call: {e}")
@@ -106,8 +119,13 @@ def main():
     if not api_key or api_key == "YOUR_GEMINI_API_KEY":
         raise ValueError("API key not found.")
         
-    embeddings = GoogleGenerativeAIEmbeddings(model=config['embeddings']['model'], google_api_key=api_key)
-    print(f"-> Embeddings model '{embeddings.model}' initialized.")
+    print("-> Initializing medical embeddings model...")
+    embeddings = HuggingFaceEmbeddings(
+        model_name="NeuML/pubmedbert-base-embeddings",
+        model_kwargs={'device': 'mps'},
+        encode_kwargs={'normalize_embeddings': True}
+    )
+    print(f"-> Embeddings model '{embeddings.model_name}' initialized.")
 
     # 1. Load base PubMedQA dataset
     print("-> Loading PubMedQA dataset from Hugging Face...")

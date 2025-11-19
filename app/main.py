@@ -41,9 +41,10 @@ def main():
     optimization_config = config['gemini'].get('optimization', {})
     
     print("-> Initializing local embeddings model for RAG (this may take a moment)...")
+    # Switched to medical-specific embeddings for better acronym/term understanding
     embeddings = HuggingFaceEmbeddings(
-        model_name="BAAI/bge-large-en-v1.5",
-        model_kwargs={'device': 'mps'},
+        model_name="NeuML/pubmedbert-base-embeddings",
+        model_kwargs={'device': 'cpu'}, # Use 'mps' on Mac if available, else 'cpu'
         encode_kwargs={'normalize_embeddings': True}
     )
     print("-> Embeddings model loaded.")

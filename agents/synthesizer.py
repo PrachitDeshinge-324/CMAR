@@ -3,7 +3,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_google_genai import ChatGoogleGenerativeAI
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Literal
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -12,6 +12,9 @@ class FinalDiagnosis(BaseModel):
     rank: int = Field(description="The final rank of the diagnosis, ordered by clinical urgency.")
     diagnosis: str = Field(description="The scientific/medical name of the potential condition.")
     general_name: str = Field(description="The general/common/layman term for the condition (e.g., 'heart attack' for MI, 'lung infection' for pneumonia).")
+    category: Literal["Critical / Must Rule Out", "Probable", "Low Probability"] = Field(
+        description="The clinical category of the diagnosis based on severity and likelihood."
+    )
     severity: int = Field(description="The assessed severity score (1-10).")
     likelihood: int = Field(description="The assessed likelihood score (1-10).")
     justification: str = Field(description="A concise summary of the justification for this ranking, combining evidence and risk assessment.")
@@ -44,14 +47,20 @@ class SynthesizerAgent:
         Your task is to synthesize a complex, multi-specialty diagnostic analysis into a single, clear, and actionable final report.
 
         The final list of differential diagnoses has already been ranked by a deterministic algorithm based on clinical urgency.
+        
+        You must categorize each diagnosis into one of three clinical workflows:
+        1. **Critical / Must Rule Out**: High severity conditions that cannot be missed, even if likelihood is moderate.
+        2. **Probable**: The most likely diagnoses based on the evidence.
+        3. **Low Probability**: Unlikely diagnoses that are being considered for completeness.
 
         Your main responsibilities are:
         1. Accurately transcribe the provided ranked list of diagnoses.
         2. For EACH diagnosis, provide BOTH:
            - The scientific/medical name (e.g., "Myocardial Infarction", "Pneumonia", "COPD")
            - The general/common/layman term (e.g., "heart attack", "lung infection", "smoking-related lung disease")
-        3. For each diagnosis, write a concise, professional justification that synthesizes the key findings from the risk assessment.
-        4. Write a brief, high-level "Overall Assessment" that summarizes the most critical findings and explains why the top-ranked diagnoses are the most urgent.
+        3. Assign the correct category based on the provided data.
+        4. For each diagnosis, write a concise, professional justification that synthesizes the key findings from the risk assessment.
+        5. Write a brief, high-level "Overall Assessment" that summarizes the most critical findings and explains why the top-ranked diagnoses are the most urgent.
         
         CRITICAL - Ground Truth Validation (if provided):
         If a ground truth diagnosis is provided, you MUST perform GENEROUS medical validation for evaluation purposes:
@@ -122,37 +131,31 @@ class SynthesizerAgent:
         ])
         self.chain = self.prompt | self.llm | self.parser
 
-    def _rank_hypotheses(self, specialty_groups: Dict, severity_weight: float = 0.5, likelihood_weight: float = 0.5) -> List[Dict]:
+    def _rank_hypotheses(self, specialty_groups: Dict, severity_weight: float = 0.2, likelihood_weight: float = 0.8) -> List[Dict]:
         """
-        Flattens and ranks all hypotheses based on clinical urgency using a weighted score.
+        UPDATED: Ranks primarily by Likelihood (Probability) to ensure the 'Right Diagnosis' is #1.
         
-        Ranking Logic: 
-        - Clinical Urgency Score = (severity × severity_weight) + (likelihood × likelihood_weight)
-        - Default weights: 50% severity, 50% likelihood (balanced)
-        - Balances critical conditions with probable diagnoses
-        
-        Args:
-            specialty_groups: Dictionary of specialty groups with hypotheses
-            severity_weight: Weight for severity (default 0.5)
-            likelihood_weight: Weight for likelihood (default 0.5)
+        New Weights:
+        - Likelihood: 0.8 (80% impact) -> Prioritizes what the patient actually HAS.
+        - Severity: 0.2 (20% impact) -> Tie-breaker for dangerous conditions.
         """
         all_hypotheses = []
         for specialty in specialty_groups:
             all_hypotheses.extend(specialty_groups[specialty])
 
-        # Filter out any hypotheses that might have failed assessment and lack scores
+        # Filter valid
         valid_hypotheses = [
             h for h in all_hypotheses if 'severity' in h and 'likelihood' in h
         ]
         
-        # Calculate weighted urgency score for each hypothesis
+        # Calculate Weighted Score for ACCURACY
         for h in valid_hypotheses:
             h['urgency_score'] = (
                 h['severity'] * severity_weight + 
                 h['likelihood'] * likelihood_weight
             )
         
-        # Sort by urgency score (descending)
+        # Sort by score (descending)
         ranked_list = sorted(
             valid_hypotheses,
             key=lambda x: x['urgency_score'],
@@ -166,6 +169,7 @@ class SynthesizerAgent:
         for i, hypo in enumerate(ranked_list):
             formatted_string += f"\n--- Rank {i+1} ---\n"
             formatted_string += f"Diagnosis: {hypo['hypothesis']}\n"
+            formatted_string += f"Category: {hypo.get('category', 'Uncategorized')}\n"
             formatted_string += f"Assigned Severity: {hypo['severity']}\n"
             formatted_string += f"Assigned Likelihood: {hypo['likelihood']}\n"
             formatted_string += f"Urgency Score: {hypo.get('urgency_score', 0):.2f}\n"
@@ -323,33 +327,24 @@ class SynthesizerAgent:
 
     def run(self, patient_summary: str, specialty_groups: Dict, ground_truth: Optional[str] = None, top_k: int = 10) -> Dict:
         """
-        Synthesizer with LLM-based ground truth validation.
-        
-        Args:
-            patient_summary: Summary of the patient's symptoms
-            specialty_groups: Dictionary of specialty groups with hypotheses
-            ground_truth: Optional ground truth diagnosis for evaluation
-            top_k: Number of top diagnoses to consider (default: 10)
-            
-        Returns:
-            Dictionary containing the final report with LLM-validated ground truth results
+        Synthesizer with Accuracy-First Ranking.
         """
-        print("-> Synthesizing and ranking the final report...")
+        print("-> Synthesizing and ranking (Accuracy Focused)...")
         
-        # 1. Perform deterministic ranking in Python
+        # 1. Perform deterministic ranking (Uses new 0.8/0.2 weights)
         ranked_diagnoses_data = self._rank_hypotheses(specialty_groups)
         
         # 2. Format for LLM
         ranked_diagnoses_prompt_str = self._format_ranked_list_for_prompt(ranked_diagnoses_data[:top_k])
         
-        # 3. Prepare ground truth for LLM validation
-        ground_truth_str = ground_truth if ground_truth else "No ground truth provided (normal operation)"
+        # 3. Prepare ground truth
+        ground_truth_str = ground_truth if ground_truth else "No ground truth provided"
         
         if ground_truth:
             print(f"-> LLM will validate against ground truth: '{ground_truth}'")
         
-        # 4. LLM call with ground truth validation
-        print("-> Invoking LLM for report generation and validation...")
+        # 4. LLM call
+        print("-> Invoking LLM for final report...")
         report = self.chain.invoke({
             "patient_summary": patient_summary,
             "ranked_diagnoses": ranked_diagnoses_prompt_str,
@@ -357,15 +352,4 @@ class SynthesizerAgent:
             "format_instructions": self.parser.get_format_instructions(),
         })
         
-        report_dict = report.dict()
-        
-        # 5. Log validation results
-        if ground_truth:
-            validation = report_dict.get('ground_truth_validation')
-            if validation and validation.get('is_correct'):
-                print(f"   ✅ LLM MATCH FOUND at rank {validation.get('best_match_rank')}: {validation.get('best_match_diagnosis')}")
-                print(f"      Reasoning: {validation.get('best_match_reasoning', 'N/A')}")
-            else:
-                print(f"   ❌ LLM found NO MATCH in top {top_k}")
-        
-        return report_dict
+        return report.dict()
