@@ -42,11 +42,22 @@ class CriticAgent:
         4.  **DISCARD_HYPOTHESIS**: If a diagnosis is clearly unsupported or redundant. Specify the hypothesis to remove.
             (Example: target='Musculoskeletal', hypothesis_to_discard='Costochondritis', feedback='The evidence found has zero relevance to this diagnosis, making it noise.')
 
+        **CRITICAL - CHECK FOR MISSING CHRONIC/LIFESTYLE CONDITIONS:**
+        Before approving, verify that the differential includes BOTH acute and chronic conditions when relevant:
+        - **Patient with alcohol/drug abuse history + respiratory symptoms** → Check for: Chronic Bronchitis, COPD, Aspiration Pneumonia, Chronic Lung Disease
+        - **Patient with smoking history** → Check for: COPD, Chronic Bronchitis, Lung Cancer
+        - **Patient with testicular swelling + infertility concerns** → Check for: Varicocele, Hydrocele, Spermatocele
+        - **Patient with diabetes** → Check for: Diabetic Neuropathy, Nephropathy, Retinopathy
+        - **Patient with chronic GI symptoms** → Check for: IBD, Chronic Gastritis, Peptic Ulcer Disease
+        
+        If a common chronic condition related to patient history is missing, use ADD_HYPOTHESIS to include it.
+
         IMPORTANT: 
         - Your directive must be targeted to a single specialty.
         - Review your previous feedback to avoid repeating the same critiques.
         - Target DIFFERENT specialties across iterations to ensure comprehensive review.
         - If you've already challenged a specialty, consider other specialties unless critical issues remain.
+        - Prioritize adding missing chronic/lifestyle-related conditions over challenging scores.
         """
         self.parser = PydanticOutputParser(pydantic_object=CriticDecision)
         self.prompt = ChatPromptTemplate.from_messages([

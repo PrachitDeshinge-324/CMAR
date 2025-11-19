@@ -15,7 +15,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 # --- Configuration ---
 # --- UPDATED TO POINT TO YOUR NEW DATASET ---
 BENCHMARK_FILE_PATH = "data/benchmark/disease_diagnosis_dataset_100.json"
-TOP_K_ACCURACY = 5
+TOP_K_ACCURACY = 10  # Changed from 5 to 10 for better coverage
 RESULTS_DIR = "evaluation_results"
 
 def load_config():

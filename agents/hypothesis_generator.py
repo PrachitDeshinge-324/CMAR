@@ -26,11 +26,18 @@ class HypothesisGenerator:
         self.system_prompt = """You are an expert medical diagnostician. Your role is to analyze a patient scenario and generate a focused list of the MOST LIKELY differential diagnoses.
 
         **CRITICAL INSTRUCTIONS:**
-        1.  **Focus on Most Relevant:** Generate 8-12 total hypotheses across the MOST relevant specialties (aim for 6-8 specialties maximum).
+        1.  **Focus on Most Relevant:** Generate 10-15 total hypotheses across the MOST relevant specialties (aim for 6-8 specialties maximum).
         2.  **Prioritize by Likelihood:** Focus on diagnoses that best match the patient's symptoms and context.
-        3.  **Consider Both Acute and Chronic Conditions:** Include both immediate concerns and underlying conditions when relevant.
-        4.  **Assign Specialty:** For each hypothesis, identify the primary medical specialty (e.g., Cardiology, Neurology, Internal Medicine).
-        5.  **Quality over Quantity:** It's better to have fewer, highly relevant diagnoses than many unlikely ones.
+        3.  **Consider BOTH Acute AND Chronic/Lifestyle Conditions:**
+            - ACUTE: Immediate life-threatening or emergency conditions
+            - CHRONIC: Long-term conditions that may be exacerbating (e.g., COPD, Chronic Bronchitis, Varicocele)
+            - LIFESTYLE-RELATED: Conditions related to patient's history (alcohol → cirrhosis, smoking → COPD)
+        4.  **Pay Special Attention to Patient History:**
+            - "Alcohol/drug abuse" → consider chronic liver disease, withdrawal, COPD, chronic bronchitis
+            - "Smoker" → consider COPD, chronic bronchitis, lung cancer
+            - "Diabetes" → consider neuropathy, nephropathy, vascular disease
+        5.  **Assign Specialty:** For each hypothesis, identify the primary medical specialty (e.g., Cardiology, Neurology, Internal Medicine).
+        6.  **Balanced Differential:** Include mix of high-severity acute AND high-likelihood chronic conditions.
         """
         self.parser = PydanticOutputParser(pydantic_object=HypothesisList)
         self.prompt = ChatPromptTemplate.from_messages([
