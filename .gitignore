@@ -84,3 +84,5 @@ models/
 *.zip
 *.json
 *.jsonl
+data/benchmark/*
+*.txt

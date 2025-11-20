@@ -17,64 +17,90 @@ from langchain_huggingface import HuggingFaceEmbeddings
 # --- CONFIGURATION ---
 BENCHMARK_FILE = "data/benchmark/medqa_usmle_100.json"
 RESULTS_DIR = "evaluation_results"
-TOP_K_CHECK = 3  # Diagnosis must be in top 3 to count as correct
-
-# Rate Limit Buffer: Pause between cases to let the API "cool down"
-# 15 RPM = 1 request every 4 seconds. 
-# A case takes ~4 calls. That's 16 seconds of "quota".
-# We add a buffer to be safe.
+TOP_K_CHECK = 5  
 INTER_CASE_DELAY = 5 
 
 def load_config():
     with open('config/config.yaml', 'r') as f: return yaml.safe_load(f)
 
 def calculate_similarity(a, b):
-    """Returns similarity ratio (0.0 - 1.0) between two strings."""
     return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
-def check_correctness(ground_truth, diagnoses):
+def check_correctness(ground_truth, diagnoses, options_list=None):
     """
-    Scientifically validates if ground truth is present in the differential.
-    Returns: (is_correct, best_match_name, score, rank)
+    Validates if the prediction matches the Ground Truth.
+    Also checks if the prediction is actually one of the valid Options.
     """
+    if not diagnoses:
+        return False, "None", 0.0, -1, "No Output"
+
     best_score = 0.0
     best_match = "None"
     best_rank = -1
+    is_correct = False
     
-    # Only check the top K ranked diagnoses
+    # 1. Check against Ground Truth
     for i, dx in enumerate(diagnoses[:TOP_K_CHECK]):
         prediction = dx['diagnosis']
-        
-        # 1. Direct Similarity Score
         score = calculate_similarity(ground_truth, prediction)
         
-        # 2. Substring Bonus (e.g. "Acute Bronchitis" contains "Bronchitis")
+        # Substring bonus (Critical for matching "Option A" to "Option A: Drug X")
         if ground_truth.lower() in prediction.lower() or prediction.lower() in ground_truth.lower():
-            score = max(score, 0.85)
+            score = max(score, 1.0) 
             
         if score > best_score:
             best_score = score
             best_match = prediction
             best_rank = i + 1
+            
+        # Threshold for correctness
+        if score >= 0.7 and i == 0: # Top-1 Accuracy Strictness
+            is_correct = True
 
-    # Threshold for correctness (0.6 is usually a good fuzzy match threshold)
-    is_correct = best_score >= 0.6
-    return is_correct, best_match, best_score, best_rank
+    # 2. Sanity Check: Did it pick a valid option?
+    status_msg = "Valid"
+    if options_list and best_match != "None":
+        # Flatten options if dict
+        valid_opts = options_list.values() if isinstance(options_list, dict) else options_list
+        # Check if prediction resembles ANY valid option
+        is_valid = False
+        for opt in valid_opts:
+            if calculate_similarity(opt, best_match) > 0.8 or opt in best_match or best_match in opt:
+                is_valid = True
+                break
+        if not is_valid:
+            status_msg = "⚠️ Hallucination (Not in options)"
+
+    return is_correct, best_match, best_score, best_rank, status_msg
 
 def process_single_case(case_data, app_instance, case_id):
-    """Runs CMAR on a single case."""
+    """Runs CMAR on a single case with Options Injection."""
     patient_summary = case_data.get('text')
     ground_truth = case_data.get('diagnosis')
+    options = case_data.get('original_options', {}) 
     
+    # --- CRITICAL FIX: INJECT OPTIONS INTO SUMMARY ---
+    options_text = ""
+    if isinstance(options, dict):
+        for key, val in options.items():
+            options_text += f"- {val}\n"
+    elif isinstance(options, list):
+        for val in options:
+            options_text += f"- {val}\n"
+            
+    if options_text:
+        full_prompt = f"{patient_summary}\n\n**CANDIDATE DIAGNOSES (OPTIONS):**\n{options_text}"
+    else:
+        full_prompt = patient_summary
+
     try:
         # Run CMAR
-        # Note: We do NOT pass ground_truth to the agent to prevent cheating
-        result = app_instance.invoke({"patient_scenario": {"summary": patient_summary}})
+        result = app_instance.invoke({"patient_scenario": {"summary": full_prompt}})
         final_report = result.get('final_report', {})
         diagnoses = final_report.get('differential_diagnoses', [])
         
-        # Validate Logic (Deterministic Python)
-        is_correct, match_name, score, rank = check_correctness(ground_truth, diagnoses)
+        # Validate
+        is_correct, match_name, score, rank, status = check_correctness(ground_truth, diagnoses, options)
         
         return {
             "status": "success",
@@ -86,93 +112,76 @@ def process_single_case(case_data, app_instance, case_id):
             "match_score": score,
             "match_rank": rank,
             "is_correct": is_correct,
-            "full_diagnoses": [d['diagnosis'] for d in diagnoses[:5]]
+            "note": status
         }
         
     except Exception as e:
-        return {
-            "status": "error", 
-            "case_id": case_id, 
-            "error": str(e)
-        }
+        return {"status": "error", "case_id": case_id, "error": str(e)}
 
 def main():
     os.makedirs(RESULTS_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_file = os.path.join(RESULTS_DIR, f"medqa_results_{timestamp}.jsonl")
+    output_file = os.path.join(RESULTS_DIR, f"medqa_results_fixed_{timestamp}.jsonl")
     
-    print(f"--- Initializing CMAR Evaluation (MedQA - Sequential) ---")
+    print(f"--- Initializing CMAR Evaluation (MedQA with Options) ---")
     load_dotenv()
     config = load_config()
     api_key = os.getenv("GOOGLE_API_KEY") or config['gemini']['api_key']
     
-    # Configure Rate Limiter: Conservative 15 RPM
-    # This handles the internal calls within the graph
     gemini_rate_limiter.configure(max_calls=14, time_window=60)
     
-    # Initialize shared models
     llm = RateLimitedChatGoogleGenerativeAI(
         model=config['gemini']['generation_model'], 
         google_api_key=api_key, 
         temperature=0
     )
     
-    print("-> Loading Embeddings (NeuML/pubmedbert-base-embeddings)...")
     embeddings = HuggingFaceEmbeddings(
         model_name="NeuML/pubmedbert-base-embeddings", 
-        model_kwargs={'device': 'mps'}, # 'mps' for Mac, 'cpu' or 'cuda' otherwise
+        model_kwargs={'device': 'mps'}, 
         encode_kwargs={'normalize_embeddings': True}
     )
     
-    # Build Graph
-    app = build_graph(llm_client=llm, embeddings_client=embeddings)
+    # Build Graph in BENCHMARK MODE
+    app = build_graph(llm_client=llm, embeddings_client=embeddings, benchmark_mode=True)
     
-    # Load Data
     try:
         with open(BENCHMARK_FILE, 'r') as f:
             cases = json.load(f)
     except FileNotFoundError:
-        print(f"❌ Error: File '{BENCHMARK_FILE}' not found. Run get_medqa_data.py first!")
+        print(f"❌ Error: Run get_medqa_data.py first!")
         return
 
-    print(f"-> Starting SEQUENTIAL evaluation of {len(cases)} cases...")
-    print(f"-> Rate Limit Protection: {INTER_CASE_DELAY}s delay between cases.")
+    # Run on 60 cases as per your previous run
+    cases_to_run = cases[:60]
+    print(f"-> Evaluating {len(cases_to_run)} cases...")
     
-    results = []
     correct_count = 0
     
-    # Sequential Loop with TQDM progress bar
-    for i, case in enumerate(tqdm(cases, desc="Evaluating")):
-        
-        # Process the case
+    for i, case in enumerate(tqdm(cases_to_run, desc="Evaluating")):
         res = process_single_case(case, app, i)
-        results.append(res)
         
-        # Save result immediately (Recovery check)
         with open(output_file, 'a') as f:
             f.write(json.dumps(res) + "\n")
         
-        # Console feedback for debugging
         if res['status'] == 'success':
+            if res['is_correct']: correct_count += 1
             symbol = "✅" if res['is_correct'] else "❌"
-            tqdm.write(f"  Case {i+1}: {symbol} GT: '{res['ground_truth']}' | Pred: '{res['best_match']}' (Score: {res['match_score']:.2f})")
-            if res['is_correct']:
-                correct_count += 1
+            # Clean console output
+            gt_short = res['ground_truth'][:30]
+            pred_short = res['cmar_top_diagnosis'][:30]
+            tqdm.write(f"  #{i+1}: {symbol} GT: '{gt_short}...' | Pred: '{pred_short}...' [{res.get('note')}]")
         else:
-            tqdm.write(f"  Case {i+1}: 🚨 Error: {res.get('error')}")
-            
-        # Force delay to respect strict RPM limits
+            tqdm.write(f"  #{i+1}: 🚨 Error: {res.get('error')}")
+        
         time.sleep(INTER_CASE_DELAY)
 
-    # Final Stats
-    accuracy = (correct_count / len(cases)) * 100
     print(f"\n\n========================================")
-    print(f"FINAL RESULTS (MedQA USMLE)")
+    print(f"FINAL RESULTS (With Options Injection)")
     print(f"========================================")
-    print(f"Total Cases: {len(cases)}")
+    print(f"Total Cases: {len(cases_to_run)}")
     print(f"Correct: {correct_count}")
-    print(f"Accuracy (Top-{TOP_K_CHECK}): {accuracy:.1f}%")
-    print(f"Detailed logs saved to: {output_file}")
+    print(f"Accuracy (Top-1): {(correct_count/len(cases_to_run))*100:.1f}%")
     print(f"========================================")
 
 if __name__ == "__main__":

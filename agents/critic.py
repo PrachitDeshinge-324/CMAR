@@ -10,49 +10,65 @@ class CriticDecision(BaseModel):
         description="The specific action the critic has decided to take."
     )
     target_specialty: Optional[str] = Field(
-        description="The specialty group this decision applies to (e.g., 'Cardiology'). Required for all actions except APPROVE."
+        description="The specialty group this decision applies to. Required for ADD/DISCARD/CHALLENGE."
     )
     feedback: str = Field(
-        description="Justification for the decision. If CHALLENGE_SCORE, a counterfactual question. If ADD/DISCARD, the reason why."
+        description="Justification. In Benchmark Mode, focus on differentiating between the top options."
     )
     new_hypothesis_name: Optional[str] = Field(
-        description="The name of the new hypothesis to add. Only required if decision is ADD_HYPOTHESIS."
+        description="Name of hypothesis to add (ADD_HYPOTHESIS only)."
     )
     hypothesis_to_discard: Optional[str] = Field(
-        description="The exact name of the hypothesis to discard. Only required if decision is DISCARD_HYPOTHESIS."
+        description="Name of hypothesis to discard (DISCARD_HYPOTHESIS only)."
     )
     questions_for_human: Optional[List[str]] = Field(
-        description="A list of the MOST CRITICAL questions (Max 5) to ask the clinician. Required if decision is ASK_HUMAN."
+        description="List of CRITICAL questions (Max 5). Required if decision is ASK_HUMAN."
     )
 
 class CriticAgent:
-    """
-    An advanced agent that reviews the analysis, identifies specific weaknesses,
-    and issues targeted, actionable directives to refine the diagnosis.
-    """
-    def __init__(self, llm: ChatGoogleGenerativeAI):
+    def __init__(self, llm: ChatGoogleGenerativeAI, benchmark_mode: bool = False):
         self.llm = llm
-        self.system_prompt = """You are a meticulous Diagnostic Reviewer. Your goal is to ensure the differential diagnosis is rigorous, logically sound, and clinically safe.
+        self.benchmark_mode = benchmark_mode
+        
+        # --- STANDARD CLINICAL PROMPT (Safety Focused - Regular Use) ---
+        standard_prompt = """You are a meticulous Diagnostic Reviewer. Your goal is clinical safety and accuracy.
 
-        Review the patient's scenario and the specialists' list of hypotheses. Choose ONE action:
+        ACTIONS:
+        1.  **APPROVE**: If the analysis is solid given available info.
+        2.  **ASK_HUMAN**: **CRITICAL USE ONLY.** Use this ONLY if the case is ambiguous AND vital info is missing (e.g., OPQRST, Red Flags).
+            - **STOP RULE:** If the patient text contains `[Clinician Responses]`, you are **FORBIDDEN** from using ASK_HUMAN. You MUST proceed with the info you have.
+            - **BATCHING:** Ask ALL necessary questions (Max 5) in one go.
+        3.  **ADD_HYPOTHESIS**: If a major diagnosis is missing.
+        4.  **CHALLENGE_SCORE**: If a score is contradicted by facts.
+        5.  **DISCARD_HYPOTHESIS**: If a diagnosis is ruled out.
 
-        1.  **APPROVE**: If the diagnosis is solid and supported by evidence.
-        2.  **ASK_HUMAN**: **CRITICAL USE ONLY.** Use this if the case is ambiguous.
-            - **CHECK FIRST:** Look at the *Patient Scenario* text. If you see the tag **'[Clinician Responses]'**, you have ALREADY asked the human. You are **FORBIDDEN** from using ASK_HUMAN again. You must make a decision with the info you have.
-            - **WHEN TO ASK:** - If the *Chief Complaint* is broad (e.g., "Chest Pain", "Abdominal Pain") and lacks **OPQRST** details (Onset, Provocation, Quality, Radiation, Severity, Time), you **MUST** ask.
-              - **Example:** "Intermittent Chest Pain" is too vague. You need to know: "Is it exertional? Relieved by rest? Radiating?"
-              - **Vitals are NOT enough:** Even if BP/HR are provided, if the *history* is vague, you must ask.
-            - **STRICT LIMIT:** Ask **Max 3-5** high-yield questions. Do not ask generic "Any other symptoms?" questions.
-        3.  **ADD_HYPOTHESIS**: If a major, high-probability diagnosis is missing.
-        4.  **CHALLENGE_SCORE**: If a score is contradicted by key facts.
-        5.  **DISCARD_HYPOTHESIS**: If a diagnosis is anatomically impossible or ruled out.
-
-        **PRIORITY SEQUENCE:**
-        1. **One-Shot Check:** Does `[Clinician Responses]` exist? -> If YES, **STOP ASKING**.
-        2. **Ambiguity Check:** Is the HPI (History of Present Illness) missing OPQRST details for the main symptom? -> **ASK_HUMAN**.
-        3. **Safety Check:** Are red flags for life-threatening conditions (e.g., "Tearing pain" for dissection) unchecked? -> **ASK_HUMAN**.
-        4. Otherwise -> Proceed with standard review.
+        **PRIORITY:**
+        1. **Check for `[Clinician Responses]`**: If present -> **DO NOT ASK**. APPROVE or REFINE only.
+        2. **Ambiguity Check**: Is OPQRST missing for Chief Complaint? -> ASK_HUMAN.
+        3. **Safety Check**: Missing red flags? -> ASK_HUMAN.
         """
+        
+        # --- BENCHMARK / EXAM PROMPT (Differentiation Focused - Eval Mode) ---
+        benchmark_prompt = """You are a Medical Board Exam Tutor taking the USMLE.
+        
+        **CRITICAL RULES FOR BENCHMARK MODE:**
+        1. **NO HUMAN INTERACTION:** You are taking a test. You cannot ask the patient questions. **NEVER select ASK_HUMAN.**
+        2. **FOCUS ON OPTIONS:** The patient summary contains a list of "Candidate Diagnoses". Your job is to ensure the correct one is ranked #1.
+        
+        **YOUR STRATEGY (COUNTERFACTUALS):**
+        - Look at the top 2-3 hypotheses.
+        - Ask: "What specific evidence rules IN the top choice and rules OUT the runner-up?"
+        - If the current ranking seems based on weak evidence, use **CHALLENGE_SCORE** to force the Risk Assessor to re-evaluate specific symptoms.
+        - If the "Correct Answer" (based on your knowledge) is missing or ranked low, use **ADD_HYPOTHESIS** or **CHALLENGE_SCORE** to boost it.
+        
+        **DECISION LOGIC:**
+        - If the analysis effectively distinguishes the likely answer from distractors -> **APPROVE**.
+        - If the analysis misses a key distinction (e.g., "Pain is relieved by rest" favors Angina over MI) -> **CHALLENGE_SCORE**.
+        - **ABSOLUTELY NO 'ASK_HUMAN'.**
+        """
+        
+        self.system_prompt = benchmark_prompt if benchmark_mode else standard_prompt
+        
         self.parser = PydanticOutputParser(pydantic_object=CriticDecision)
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", self.system_prompt),
@@ -63,10 +79,11 @@ class CriticAgent:
             **Previous Feedback:**
             {previous_feedback}
 
-            **Current Analysis from Specialists:**
+            **Current Analysis:**
             {combined_analysis}
 
-            Review the analysis. Remember: If `[Clinician Responses]` is present, do NOT ask again.
+            {dynamic_instruction}
+
             {format_instructions}
             """)
         ])
@@ -86,43 +103,52 @@ class CriticAgent:
         return formatted_string
     
     def _format_previous_feedback(self, critic_history: List[Dict]) -> str:
-        """Format previous critic feedback to help avoid repetition."""
-        if not critic_history:
-            return "None - This is the first iteration."
-        
+        if not critic_history: return "None - This is the first iteration."
         formatted = ""
         for i, feedback in enumerate(critic_history, 1):
-            formatted += f"\nIteration {i}:\n"
-            formatted += f"  Decision: {feedback.get('decision')}\n"
-            formatted += f"  Target: {feedback.get('target_specialty', 'N/A')}\n"
-            formatted += f"  Feedback: {feedback.get('feedback', 'N/A')}\n"
+            formatted += f"\nIt {i}: {feedback.get('decision')} - {feedback.get('feedback')}\n"
         return formatted
-    
-    def _get_targeted_specialties(self, critic_history: List[Dict]) -> set:
-        """Extract all specialties that have already been targeted by the critic."""
-        if not critic_history:
-            return set()
-        return {h.get('target_specialty') for h in critic_history if h.get('target_specialty')}
-    
-    def _get_untargeted_specialties(self, specialty_groups: Dict, critic_history: List[Dict]) -> List[str]:
-        """Get list of specialties that haven't been reviewed yet."""
-        all_specialties = set(specialty_groups.keys())
-        targeted = self._get_targeted_specialties(critic_history)
-        untargeted = all_specialties - targeted
-        return list(untargeted)
 
     def run(self, patient_summary: str, specialty_groups: Dict, critic_history: List[Dict] = None) -> Dict:
-        """Runs the critic agent with structural memory to ensure specialty diversity."""
-        print("-> Critic Agent is reviewing the analysis...")
+        print("-> Critic Agent is reviewing...")
         
+        # --- DYNAMIC INSTRUCTION INJECTION ---
+        dynamic_instruction = ""
+        
+        if self.benchmark_mode:
+            if "Candidate Diagnoses" in patient_summary:
+                dynamic_instruction = "\n\n**REMINDER:** This is an exam question with OPTIONS. Use counterfactuals to pick the BEST option. DO NOT ASK HUMAN."
+        else:
+            # Regular Mode: Check for existing human responses to prevent loops
+            has_human_response = "[Clinician Responses]" in patient_summary or "[Additional Information" in patient_summary
+            if has_human_response:
+                print("   🛡️ Human input detected. Locking 'ASK_HUMAN' option.")
+                dynamic_instruction = "\n\n**SYSTEM NOTICE:** Clinician has ALREADY answered. You are **STRICTLY FORBIDDEN** from selecting 'ASK_HUMAN'. Proceed with available info."
+
         combined_analysis = self._format_analysis_for_prompt(specialty_groups)
         previous_feedback = self._format_previous_feedback(critic_history or [])
         
+        # --- INVOKE LLM ---
         result = self.chain.invoke({
             "patient_summary": patient_summary,
             "combined_analysis": combined_analysis,
             "previous_feedback": previous_feedback,
+            "dynamic_instruction": dynamic_instruction,
             "format_instructions": self.parser.get_format_instructions(),
         })
         
+        # --- FAILSAFE: HARD OVERRIDE ---
+        # If LLM hallucinates and tries to ASK_HUMAN when it shouldn't, force fix it.
+        if result.decision == "ASK_HUMAN":
+            if self.benchmark_mode:
+                print("   🚨 Critic tried to ASK_HUMAN in Benchmark Mode. Overriding to APPROVE.")
+                result.decision = "APPROVE"
+                result.feedback = "Proceeding with best available evidence (Benchmark Mode Override)."
+                result.questions_for_human = []
+            elif "[Clinician Responses]" in patient_summary:
+                print("   🚨 Critic tried to loop (Ask Human again). Overriding to APPROVE.")
+                result.decision = "APPROVE"
+                result.feedback = "Proceeding with diagnosis based on provided clinician responses."
+                result.questions_for_human = []
+            
         return result.dict()
