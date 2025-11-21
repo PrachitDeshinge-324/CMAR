@@ -45,7 +45,7 @@ if __name__ == '__main__':
     print("-> Initializing local embeddings model to run on Mac's MPS...")
     embeddings = HuggingFaceEmbeddings(
         model_name="BAAI/bge-large-en-v1.5",
-        model_kwargs={'device': 'mps'}, # Use 'mps' for Apple Silicon
+        model_kwargs={'device': 'cuda'}, # Use 'mps' for Apple Silicon
         encode_kwargs={'normalize_embeddings': True}
     )
     

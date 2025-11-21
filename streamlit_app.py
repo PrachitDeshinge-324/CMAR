@@ -122,7 +122,7 @@ def load_resources():
     
     embeddings = HuggingFaceEmbeddings(
         model_name="NeuML/pubmedbert-base-embeddings",
-        model_kwargs={'device': 'mps'}, 
+        model_kwargs={'device': 'cuda'}, 
         encode_kwargs={'normalize_embeddings': True}
     )
     return llm, embeddings, config

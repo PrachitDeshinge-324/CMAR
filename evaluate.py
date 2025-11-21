@@ -66,7 +66,7 @@ def initialize_models_and_graph():
     print("-> Initializing local embeddings model for RAG...")
     embeddings = HuggingFaceEmbeddings(
         model_name="NeuML/pubmedbert-base-embeddings",
-        model_kwargs={'device': 'mps'},
+        model_kwargs={'device': 'cuda'},
         encode_kwargs={'normalize_embeddings': True}
     )
     print("-> Embeddings model loaded.")

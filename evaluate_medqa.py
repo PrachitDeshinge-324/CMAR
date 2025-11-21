@@ -138,7 +138,7 @@ def main():
     
     embeddings = HuggingFaceEmbeddings(
         model_name="NeuML/pubmedbert-base-embeddings", 
-        model_kwargs={'device': 'mps'}, 
+        model_kwargs={'device': 'cuda'}, 
         encode_kwargs={'normalize_embeddings': True}
     )
     

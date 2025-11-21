@@ -122,7 +122,7 @@ def main():
     print("-> Initializing medical embeddings model...")
     embeddings = HuggingFaceEmbeddings(
         model_name="NeuML/pubmedbert-base-embeddings",
-        model_kwargs={'device': 'mps'},
+        model_kwargs={'device': 'cuda'},
         encode_kwargs={'normalize_embeddings': True}
     )
     print(f"-> Embeddings model '{embeddings.model_name}' initialized.")
